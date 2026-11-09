@@ -117,6 +117,7 @@ interface SettlementAdapter {
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
 | `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `bump` |
 | `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
+| `FeeLedger` | `["fees", payment_mint]` | `payment_mint`, `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. Created by `list_currency` with the fee vault. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
 | `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent |
 | `Deal` | `["deal", proposer, deal_id]` | `proposer`, `counterparty` (or open), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `bump` |
 | Deal vault | ATA(Deal PDA, deposited mint) | holds the proposer's deposit until accept/cancel/expiry |
@@ -179,7 +180,8 @@ Each `transfer_checked` uses its own mint's decimals; zero-amount legs (e.g.
 1. `transfer_checked` asset: seller → buyer (authority = vault PDA as delegate)
 2. `transfer_checked` payment: buyer → seller, `seller_receives`
 3. `transfer_checked` payment: buyer → fee vault, `fee`
-4. `CashbackLedger.accrued += cashback`
+4. `FeeLedger.fees_collected += fee`, `FeeLedger.cashback_accrued += cashback`,
+   `CashbackLedger.accrued += cashback`
 5. `emit_cpi!(Settled { order_id, asset_mint, payment_mint, buyer, seller, asset_amount, payment_amount, fee, cashback })`
 
 ### 3.5 Custody model — DECISION (2026-10-22): delegate for listing, escrow for P2P
@@ -306,8 +308,13 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 - Invariants (must hold under fuzzing):
   1. `payment_amount == seller_receives + fee` for every settlement
   2. `Σ cashback accrued ≤ Σ fees collected` per payment mint
+     (`FeeLedger.cashback_accrued ≤ FeeLedger.fees_collected`, and
+     `FeeLedger.cashback_accrued == Σ CashbackLedger.accrued` for that mint)
   3. no settlement on a listing whose status ≠ `Approved`
   4. vault balance == unwithdrawn protocol fees + unwithdrawn cashback
+     (`fees_collected − protocol_withdrawn − cashback_withdrawn`). Anyone can
+     transfer into a fee vault, so on-chain this is `≥`; donations are not
+     accounted and cannot be withdrawn. Fuzzing has no donations and checks `==`
   5. `fee_bps ≤ MAX_FEE_BPS` always, even after timelocked changes
   6. an escrowed deposit always ends in exactly one place: counterparty (executed)
      or proposer (cancelled/expired). It is never stranded and never paid twice

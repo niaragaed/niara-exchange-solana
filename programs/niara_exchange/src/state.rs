@@ -196,7 +196,7 @@ impl Listing {
 /// Issuer cashback owed for one listing, in one payment mint.
 /// PDA: `["cashback", listing, payment_mint]`. Created by `init_cashback_ledger`.
 #[account]
-#[derive(InitSpace)]
+#[derive(InitSpace, Debug)]
 pub struct CashbackLedger {
     pub listing: Pubkey,
     pub payment_mint: Pubkey,
@@ -209,6 +209,63 @@ impl CashbackLedger {
     pub fn available(&self) -> Result<u64> {
         self.accrued
             .checked_sub(self.withdrawn)
+            .ok_or_else(|| error!(ExchangeError::MathOverflow))
+    }
+}
+
+/// Fee accounting for one payment mint. PDA: `["fees", payment_mint]`.
+/// Created by `list_currency` together with the fee vault
+/// `["fee_vault", payment_mint]`.
+///
+/// `fees_collected` is the gross fee (protocol share + cashback). Derived:
+/// - protocol share accrued = `fees_collected - cashback_accrued`
+/// - unwithdrawn = `fees_collected - protocol_withdrawn - cashback_withdrawn`
+///
+/// Invariant 4: the fee vault balance equals the unwithdrawn amount. Anyone
+/// can transfer tokens into the vault, so on-chain it is strictly `>=`; such
+/// donations are not accounted and cannot be withdrawn.
+#[account]
+#[derive(InitSpace, Debug)]
+pub struct FeeLedger {
+    pub payment_mint: Pubkey,
+    pub fees_collected: u64,
+    /// Sum of `CashbackLedger::accrued` over all listings, in this mint.
+    pub cashback_accrued: u64,
+    pub protocol_withdrawn: u64,
+    /// Sum of `CashbackLedger::withdrawn` over all listings, in this mint.
+    pub cashback_withdrawn: u64,
+    pub bump: u8,
+    pub vault_bump: u8,
+}
+
+impl FeeLedger {
+    /// Records one settlement's fee, of which `cashback` goes to the issuer.
+    pub fn record_fee(&mut self, fee: u64, cashback: u64) -> Result<()> {
+        require!(cashback <= fee, ExchangeError::MathOverflow);
+        self.fees_collected = self
+            .fees_collected
+            .checked_add(fee)
+            .ok_or(ExchangeError::MathOverflow)?;
+        self.cashback_accrued = self
+            .cashback_accrued
+            .checked_add(cashback)
+            .ok_or(ExchangeError::MathOverflow)?;
+        Ok(())
+    }
+
+    /// Protocol share not yet withdrawn by the treasury.
+    pub fn protocol_available(&self) -> Result<u64> {
+        self.fees_collected
+            .checked_sub(self.cashback_accrued)
+            .and_then(|accrued| accrued.checked_sub(self.protocol_withdrawn))
+            .ok_or_else(|| error!(ExchangeError::MathOverflow))
+    }
+
+    /// What the fee vault must hold (invariant 4).
+    pub fn unwithdrawn(&self) -> Result<u64> {
+        self.fees_collected
+            .checked_sub(self.protocol_withdrawn)
+            .and_then(|v| v.checked_sub(self.cashback_withdrawn))
             .ok_or_else(|| error!(ExchangeError::MathOverflow))
     }
 }

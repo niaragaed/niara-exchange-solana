@@ -67,6 +67,9 @@ fn assert_settles(asset_program: Pubkey, payment_program: Pubkey) {
     assert_eq!(after.seller_payment, before.seller_payment + PAYMENT - fee);
     assert_eq!(after.fee_vault, before.fee_vault + fee);
     assert_eq!(after.cashback_accrued, cashback);
+    let ledger = env.fee_ledger(&m.payment_mint);
+    assert_eq!((ledger.fees_collected, ledger.cashback_accrued), (fee, cashback));
+    env.assert_vault_matches_ledger(&m.payment_mint);
 
     // Delegations are consumed, not reset.
     assert_eq!(env.token_account(&m.seller_asset).delegated_amount, 1_000 - ASSETS);

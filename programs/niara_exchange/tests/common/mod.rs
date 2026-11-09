@@ -421,6 +421,7 @@ impl Env {
                 listing: listing_pda(&mint),
                 vault_authority: vault_authority(),
                 fee_vault: fee_vault_pda(&mint),
+                fee_ledger: fee_ledger_pda(&mint),
                 token_program: self.owner_of(&mint),
                 system_program: system_program::ID,
                 event_authority: event_authority(),

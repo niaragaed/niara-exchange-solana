@@ -73,7 +73,8 @@ pub fn handle_submit_listing(
 /// listings, so the listing authority creates it directly as `Approved`, with no
 /// issuer and no cashback. Unlike asset mints, a currency mint may have a freeze
 /// authority (USDC does): an accepted, curated risk (spec §3.8).
-/// Also creates the currency's fee vault, so `settle` never has to.
+/// Also creates the currency's fee vault and fee ledger, so `settle` never has
+/// to.
 #[event_cpi]
 #[derive(Accounts)]
 pub struct ListCurrency<'info> {
@@ -110,6 +111,14 @@ pub struct ListCurrency<'info> {
         token::token_program = token_program
     )]
     pub fee_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        init,
+        payer = listing_authority,
+        space = 8 + FeeLedger::INIT_SPACE,
+        seeds = [FEE_LEDGER_SEED, asset_mint.key().as_ref()],
+        bump
+    )]
+    pub fee_ledger: Box<Account<'info, FeeLedger>>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
@@ -129,6 +138,15 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         bump: ctx.bumps.listing,
     };
     ctx.accounts.listing.set_inner(listing.clone());
+    ctx.accounts.fee_ledger.set_inner(FeeLedger {
+        payment_mint: listing.asset_mint,
+        fees_collected: 0,
+        cashback_accrued: 0,
+        protocol_withdrawn: 0,
+        cashback_withdrawn: 0,
+        bump: ctx.bumps.fee_ledger,
+        vault_bump: ctx.bumps.fee_vault,
+    });
     emit_cpi!(ListingApproved {
         listing: ctx.accounts.listing.key(),
         asset_mint: listing.asset_mint,

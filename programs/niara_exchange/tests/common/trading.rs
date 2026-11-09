@@ -3,7 +3,7 @@
 use super::*;
 use anchor_spl::token::spl_token::state::{Account as TokenAccountState, AccountState};
 use niara_exchange::{
-    CashbackLedger, CASHBACK_SEED, FEE_VAULT_SEED, SETTLED_SEED,
+    CashbackLedger, FeeLedger, CASHBACK_SEED, FEE_LEDGER_SEED, FEE_VAULT_SEED, SETTLED_SEED,
     VAULT_SEED,
 };
 
@@ -18,6 +18,10 @@ pub fn vault_authority() -> Pubkey {
 
 pub fn fee_vault_pda(payment_mint: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[FEE_VAULT_SEED, payment_mint.as_ref()], &program_id()).0
+}
+
+pub fn fee_ledger_pda(payment_mint: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[FEE_LEDGER_SEED, payment_mint.as_ref()], &program_id()).0
 }
 
 pub fn cashback_pda(asset_mint: &Pubkey, payment_mint: &Pubkey) -> Pubkey {
@@ -75,6 +79,7 @@ pub struct SettleAccounts {
     pub seller_payment: Pubkey,
     pub vault_authority: Pubkey,
     pub fee_vault: Pubkey,
+    pub fee_ledger: Pubkey,
     pub cashback_ledger: Pubkey,
     pub asset_program: Pubkey,
     pub payment_program: Pubkey,
@@ -268,6 +273,7 @@ impl Env {
             seller_payment: m.seller_payment,
             vault_authority: vault_authority(),
             fee_vault: fee_vault_pda(&m.payment_mint),
+            fee_ledger: fee_ledger_pda(&m.payment_mint),
             cashback_ledger: m.cashback_ledger(),
             asset_program: m.asset_program,
             payment_program: m.payment_program,
@@ -309,6 +315,7 @@ impl Env {
                 buyer_payment_account: a.buyer_payment,
                 seller_payment_account: a.seller_payment,
                 vault_authority: a.vault_authority,
+                fee_ledger: a.fee_ledger,
                 fee_vault: a.fee_vault,
                 cashback_ledger: a.cashback_ledger,
                 settlement_record: settled_pda(&id),
@@ -344,6 +351,20 @@ impl Env {
             instruction::InitCashbackLedger {},
         );
         self.send(&[ix], &[payer])
+    }
+
+    pub fn fee_ledger(&self, payment_mint: &Pubkey) -> FeeLedger {
+        self.fetch(&fee_ledger_pda(payment_mint))
+    }
+
+    /// Invariant 4 (no donations): fee vault balance == unwithdrawn fees.
+    pub fn assert_vault_matches_ledger(&self, payment_mint: &Pubkey) {
+        let ledger = self.fee_ledger(payment_mint);
+        assert_eq!(
+            self.balance(&fee_vault_pda(payment_mint)),
+            ledger.fees_collected - ledger.protocol_withdrawn - ledger.cashback_withdrawn,
+            "fee vault balance != unwithdrawn fees: {ledger:?}"
+        );
     }
 
     pub fn cashback(&self, m: &Market) -> CashbackLedger {

@@ -92,8 +92,14 @@ pub struct Settle<'info> {
     pub vault_authority: UncheckedAccount<'info>,
     #[account(
         mut,
+        seeds = [FEE_LEDGER_SEED, payment_mint.key().as_ref()],
+        bump = fee_ledger.bump
+    )]
+    pub fee_ledger: Box<Account<'info, FeeLedger>>,
+    #[account(
+        mut,
         seeds = [FEE_VAULT_SEED, payment_mint.key().as_ref()],
-        bump,
+        bump = fee_ledger.vault_bump,
         token::mint = payment_mint,
         token::authority = vault_authority,
         token::token_program = payment_token_program
@@ -213,7 +219,11 @@ pub fn handle_settle(
         signer_seeds,
     )?;
 
-    // 4. Accounting.
+    // 4. Accounting: the fee ledger tracks the gross fee and the cashback
+    // share per payment mint; the cashback ledger tracks it per listing.
+    ctx.accounts
+        .fee_ledger
+        .record_fee(split.fee, split.cashback)?;
     let ledger = &mut ctx.accounts.cashback_ledger;
     ledger.accrued = ledger
         .accrued

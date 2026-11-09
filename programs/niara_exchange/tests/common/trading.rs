@@ -370,4 +370,57 @@ impl Env {
     pub fn cashback(&self, m: &Market) -> CashbackLedger {
         self.fetch(&m.cashback_ledger())
     }
+
+    pub fn withdraw_cashback(
+        &mut self,
+        issuer: &Keypair,
+        asset_mint: Pubkey,
+        payment_mint: Pubkey,
+        destination: Pubkey,
+        amount: u64,
+    ) -> TransactionResult {
+        let ix = ix(
+            accounts::WithdrawCashback {
+                issuer: issuer.pubkey(),
+                config: config_pda(),
+                listing: listing_pda(&asset_mint),
+                payment_mint,
+                cashback_ledger: cashback_pda(&asset_mint, &payment_mint),
+                fee_ledger: fee_ledger_pda(&payment_mint),
+                vault_authority: vault_authority(),
+                fee_vault: fee_vault_pda(&payment_mint),
+                destination,
+                token_program: self.owner_of(&payment_mint),
+                event_authority: event_authority(),
+                program: program_id(),
+            },
+            instruction::WithdrawCashback { amount },
+        );
+        self.send(&[ix], &[issuer])
+    }
+
+    pub fn withdraw_protocol_fees(
+        &mut self,
+        treasury: &Keypair,
+        payment_mint: Pubkey,
+        destination: Pubkey,
+        amount: u64,
+    ) -> TransactionResult {
+        let ix = ix(
+            accounts::WithdrawProtocolFees {
+                treasury: treasury.pubkey(),
+                config: config_pda(),
+                payment_mint,
+                fee_ledger: fee_ledger_pda(&payment_mint),
+                vault_authority: vault_authority(),
+                fee_vault: fee_vault_pda(&payment_mint),
+                destination,
+                token_program: self.owner_of(&payment_mint),
+                event_authority: event_authority(),
+                program: program_id(),
+            },
+            instruction::WithdrawProtocolFees { amount },
+        );
+        self.send(&[ix], &[treasury])
+    }
 }

@@ -95,4 +95,14 @@ pub mod niara_exchange {
     ) -> Result<()> {
         instructions::settle::handle_settle(ctx, order_id, asset_amount, payment_amount)
     }
+
+    // ---- Withdrawals (pull model; blocked while paused) ------------------
+
+    pub fn withdraw_cashback(ctx: Context<WithdrawCashback>, amount: u64) -> Result<()> {
+        instructions::withdraw::handle_withdraw_cashback(ctx, amount)
+    }
+
+    pub fn withdraw_protocol_fees(ctx: Context<WithdrawProtocolFees>, amount: u64) -> Result<()> {
+        instructions::withdraw::handle_withdraw_protocol_fees(ctx, amount)
+    }
 }

@@ -58,4 +58,10 @@ pub enum ExchangeError {
     InsufficientDelegation,
     #[msg("Listing is not eligible for cashback")]
     NotCashbackEligible,
+    #[msg("Amount exceeds the cashback available to withdraw")]
+    InsufficientCashback,
+    #[msg("Amount exceeds the protocol fees available to withdraw")]
+    InsufficientProtocolFees,
+    #[msg("Destination must not be the fee vault")]
+    InvalidDestination,
 }

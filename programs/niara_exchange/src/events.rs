@@ -74,3 +74,20 @@ pub struct Settled {
     pub fee: u64,
     pub cashback: u64,
 }
+
+#[event]
+pub struct CashbackWithdrawn {
+    pub listing: Pubkey,
+    pub issuer: Pubkey,
+    pub payment_mint: Pubkey,
+    pub destination: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct ProtocolFeesWithdrawn {
+    pub treasury: Pubkey,
+    pub payment_mint: Pubkey,
+    pub destination: Pubkey,
+    pub amount: u64,
+}

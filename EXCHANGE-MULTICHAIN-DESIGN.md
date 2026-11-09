@@ -138,10 +138,24 @@ interface SettlementAdapter {
 | `accept_deal` | counterparty | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges fee, accrues cashback, closes vault (see 3.5) |
 | `cancel_deal` | proposer (while `Open`) | refund deposit, close vault |
 | `expire_deal` | anyone, after `expires_at` | refund deposit to proposer (permissionless crank) |
-| `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault |
-| `withdraw_protocol_fees(amount)` | treasury | pull protocol share |
+| `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault |
+| `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
 | `propose_change` / `execute_change` | admin | timelocked fee/cashback/operator/authority changes |
-| `pause` / `unpause` | admin | circuit breaker (settle reverts while paused) |
+| `pause` / `unpause` | admin | circuit breaker (see below) |
+
+**Pause principle.** A pause stops the protocol from paying out based on its
+own accounting, but never stops a user from taking back their own escrowed
+deposit. While `paused`:
+- **blocked:** `settle`, `open_deal`, `accept_deal`, `withdraw_cashback`,
+  `withdraw_protocol_fees`. If the incident is an accounting bug (e.g.
+  over-credited cashback), withdrawals are exactly the drain path.
+- **always allowed:** `cancel_deal` and `expire_deal` (a user reclaims their own
+  deposit, which the protocol's accounting does not decide), listing actions
+  (`submit_listing`, `list_currency`, `approve_listing`, `suspend_listing`,
+  `delist`), `init_cashback_ledger`, and admin/timelock actions.
+
+Listing status gates trading, not payouts: accrued cashback and protocol fees
+stay withdrawable after the asset is delisted or the currency is suspended.
 
 ### 3.4 `settle` — the core
 

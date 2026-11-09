@@ -137,9 +137,14 @@ fn allocate_mint(env: &mut Env, extensions: &[ExtensionType]) -> Pubkey {
     mint
 }
 
+/// Listable mints have no freeze authority (spec §3.8).
 fn initialize_mint(mint: &Pubkey, authority: &Pubkey) -> Instruction {
-    // A freeze authority is required by `DefaultAccountState(Frozen)` in the
-    // control case; set it everywhere so the cases differ only in the extension.
+    t22::initialize_mint2(&ID, mint, authority, None, 6).unwrap()
+}
+
+/// The control case needs a freeze authority: Token-2022 refuses
+/// `DefaultAccountState(Frozen)` on a mint without one.
+fn initialize_mint_with_freeze(mint: &Pubkey, authority: &Pubkey) -> Instruction {
     t22::initialize_mint2(&ID, mint, authority, Some(authority), 6).unwrap()
 }
 
@@ -194,7 +199,7 @@ fn control_disallowed_extensions_initialize_before_initialize_mint() {
         let mint = allocate_mint(&mut env, &[case.extension]);
         let ixs = [
             (case.build)(&mint, &authority.pubkey()),
-            initialize_mint(&mint, &authority.pubkey()),
+            initialize_mint_with_freeze(&mint, &authority.pubkey()),
         ];
         env.send(&ixs, &[&authority])
             .unwrap_or_else(|e| panic!("{:?} control failed: {e:?}", case.extension));

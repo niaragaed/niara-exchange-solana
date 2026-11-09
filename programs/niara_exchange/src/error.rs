@@ -36,4 +36,6 @@ pub enum ExchangeError {
     InvalidStatusTransition,
     #[msg("Mint has a Token-2022 extension outside the allowlist (MetadataPointer, TokenMetadata)")]
     UnsupportedMintExtension,
+    #[msg("Asset mints must not have a freeze authority")]
+    FreezeAuthorityNotAllowed,
 }

@@ -284,6 +284,20 @@ impl Env {
         mint
     }
 
+    /// Sets the freeze authority of an existing SPL Token or Token-2022 mint.
+    /// Both share the base layout: `freeze_authority` is a `COption<Pubkey>`
+    /// (u32 tag + 32 bytes) at offset 46.
+    pub fn set_freeze_authority(&mut self, mint: &Pubkey, authority: Option<Pubkey>) {
+        let mut account = self.svm.get_account(mint).unwrap();
+        let (tag, key) = match authority {
+            Some(k) => (1u32, k.to_bytes()),
+            None => (0u32, [0u8; 32]),
+        };
+        account.data[46..50].copy_from_slice(&tag.to_le_bytes());
+        account.data[50..82].copy_from_slice(&key);
+        self.svm.set_account(*mint, account).unwrap();
+    }
+
     /// Overwrites the type tag of the first TLV entry of a Token-2022 mint with a
     /// value no known extension uses.
     pub fn corrupt_first_extension_type(&mut self, mint: &Pubkey) {

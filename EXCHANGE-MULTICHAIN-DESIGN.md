@@ -262,6 +262,16 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   extensions to a mint after initialization, so the check holds for the life of
   the listing; `settle` and `open_deal` will still re-run it on both the asset
   and the payment mint as defense in depth.
+- **Freeze authority.** The extension allowlist does not cover the base mint's
+  `freeze_authority`. Asset mints (`submit_listing`) must have
+  `freeze_authority == None`, otherwise the issuer could freeze escrow vaults,
+  fee vaults or holders' accounts mid-settlement (`FreezeAuthorityNotAllowed`).
+  Neither token program can add a freeze authority once it is `None`, so the
+  check holds for the life of the listing; `settle` re-checks it. Currency mints
+  (`list_currency`) **may** have one, because real stablecoins do (USDC, USDT):
+  this is an accepted, curated risk. A currency issuer can freeze a fee vault
+  or a user's payment account, which makes settlements and withdrawals in that
+  currency revert (nothing moves) until it unfreezes.
 
 ### 3.9 Testing
 

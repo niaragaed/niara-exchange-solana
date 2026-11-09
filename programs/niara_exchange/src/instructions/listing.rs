@@ -5,7 +5,7 @@ use crate::{
     constants::*,
     error::ExchangeError,
     events::{ListingApproved, ListingDelisted, ListingSubmitted, ListingSuspended},
-    mint_policy::require_allowed_mint_extensions,
+    mint_policy::{require_allowed_mint_extensions, require_no_freeze_authority},
     state::*,
 };
 
@@ -39,6 +39,7 @@ pub fn handle_submit_listing(
     );
     require!(doc_hash != [0u8; 32], ExchangeError::EmptyDocHash);
     require_allowed_mint_extensions(&ctx.accounts.asset_mint.to_account_info())?;
+    require_no_freeze_authority(&ctx.accounts.asset_mint)?;
 
     let issuer = ctx.accounts.issuer.key();
     let mint_authority: Option<Pubkey> = ctx.accounts.asset_mint.mint_authority.into();
@@ -70,7 +71,8 @@ pub fn handle_submit_listing(
 
 /// Niara-curated currency (stablecoin) listing. Stablecoin issuers do not submit
 /// listings, so the listing authority creates it directly as `Approved`, with no
-/// issuer and no cashback.
+/// issuer and no cashback. Unlike asset mints, a currency mint may have a freeze
+/// authority (USDC does): an accepted, curated risk (spec §3.8).
 #[event_cpi]
 #[derive(Accounts)]
 pub struct ListCurrency<'info> {

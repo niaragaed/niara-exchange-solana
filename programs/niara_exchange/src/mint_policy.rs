@@ -55,3 +55,19 @@ pub fn require_allowed_mint_extensions(mint: &AccountInfo) -> Result<()> {
     }
     Ok(())
 }
+
+/// Asset mints (listed through `submit_listing`) must have no freeze
+/// authority: otherwise the issuer could freeze escrow vaults, fee vaults or
+/// counterparties' accounts. SPL Token and Token-2022 cannot add a freeze
+/// authority once it is `None`, so the check holds for the life of the listing.
+///
+/// Currency (payment) mints are exempt: real stablecoins such as USDC have a
+/// freeze authority. Niara accepts that as a curated risk when it lists a
+/// currency (spec §3.8).
+pub fn require_no_freeze_authority(mint: &anchor_spl::token_interface::Mint) -> Result<()> {
+    require!(
+        mint.freeze_authority.is_none(),
+        ExchangeError::FreezeAuthorityNotAllowed
+    );
+    Ok(())
+}

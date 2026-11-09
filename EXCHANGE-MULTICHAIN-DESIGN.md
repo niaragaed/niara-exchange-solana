@@ -209,6 +209,16 @@ the Ed25519 program + instructions sysvar; EVM: EIP-712, verified with `ecrecove
   settlement operator is trusted to respect matched prices; signed intents are
   the next milestone"). Never claim trustless settlement without it.
 
+**Program upgrade authority (applies to both modes).** Whoever holds the
+program's upgrade authority can replace the program, and with it every rule
+above, including the admin timelock: an upgrade takes effect immediately and is
+not subject to `propose_change` / `execute_change`. In v1 (testnet) the upgrade
+authority is a **single key**, and the same key is the one allowed to call
+`initialize_config`. Production plan: move the upgrade authority to a **Squads
+multisig** (ideally with its own time delay), or **make the program immutable**
+(freeze the upgrade authority) after audit. Until then, "timelocked admin" must
+always be stated together with "single-key upgrade authority".
+
 ### 3.7 Future compliance layer (talking point, not v1)
 
 Token-2022 extensions give Solana-native securities controls:
@@ -216,6 +226,11 @@ Token-2022 extensions give Solana-native securities controls:
 - **TransferHook** — every transfer calls a program that enforces allowlists/lock-ups
   (the Solana equivalent of `RestrictedTransferPolicy` in niara-contracts-PMEs).
 - **Metadata** — on-mint instrument metadata.
+
+Note: the v1 mint extension allowlist (§3.8) rejects `DefaultAccountState` and
+`TransferHook`. Adopting this compliance layer therefore means revisiting the
+allowlist and the settlement/escrow design (e.g. thaw handling, hook accounts
+in CPIs, a vetted hook program) — not just enabling the extensions.
 
 ### 3.8 Security checklist (Anchor)
 
@@ -225,12 +240,40 @@ Token-2022 extensions give Solana-native securities controls:
 - Avoid `init_if_needed` unless strictly necessary (re-init risks); prefer explicit init
 - PDA signer only through `CpiContext::new_with_signer` with the vault seeds
 - Timelock reads `Clock::get()?.unix_timestamp`
+- **Mint extension allowlist** (implemented in `mint_policy.rs`, enforced by
+  `submit_listing` and `list_currency`). Accepted: SPL Token mints, and
+  Token-2022 mints whose only extensions are `MetadataPointer` and/or
+  `TokenMetadata`. Everything else is rejected with `UnsupportedMintExtension`,
+  including extension types the program does not know. It is an allowlist, not
+  a denylist, so a future Token-2022 extension is rejected by default.
+
+  | Rejected extension | Why |
+  |---|---|
+  | `PermanentDelegate` | the delegate can transfer or burn from any account, so it can drain escrow vaults |
+  | `TransferFeeConfig` | the receiver gets less than the amount sent, which breaks `payment_amount == seller_receives + fee` |
+  | `TransferHook` | runs third-party code inside settlement |
+  | `DefaultAccountState` (frozen), `Pausable` | frozen or paused state can strand a settlement or an escrowed deposit |
+  | `NonTransferable` | the token cannot move, so settlement can never succeed |
+  | `ConfidentialTransferMint` | hidden balances the program cannot check |
+  | `MintCloseAuthority` | the mint can be closed (and its address reused) under a live listing |
+  | any other or unknown type | not reviewed, so not accepted |
+
+  Extensions are checked at listing time. Token-2022 cannot add the rejected
+  extensions to a mint after initialization, so the check holds for the life of
+  the listing; `settle` and `open_deal` will still re-run it on both the asset
+  and the payment mint as defense in depth.
 
 ### 3.9 Testing
 
 - Unit/integration: LiteSVM (Rust, `cargo test` after `anchor build`; fast, deterministic)
-- Fuzzing: **Trident** (Solana fuzzing framework) — same role Foundry invariant
-  fuzzing plays in niara-contracts
+- Invariant/property testing: **`proptest` over LiteSVM** — random sequences of
+  instructions (valid and invalid) against the real `.so`, with the invariants
+  below checked after every step; same role Foundry invariant fuzzing plays in
+  niara-contracts. Trident is not used: as of 2026-11 its latest stable release
+  (0.12.0) targets Solana 2.3 crates and documents no Anchor 1.x support.
+  Re-evaluate if that changes.
+- Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
+  fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):
   1. `payment_amount == seller_receives + fee` for every settlement
   2. `Σ cashback accrued ≤ Σ fees collected` per payment mint
@@ -243,6 +286,8 @@ Token-2022 extensions give Solana-native securities controls:
   8. mode/class coupling: `settle` never succeeds on a non-`Equity` listing;
      `open_deal`/`accept_deal` never succeed on an `Equity` listing
   9. a `Currency` listing never accrues cashback
+  10. `settle` and the escrow instructions only accept a payment mint that has an
+      `Approved` `Currency` listing
 
 ### 3.10 Out of v1 scope (state it, don't fake it)
 
@@ -330,7 +375,7 @@ Narrative: *the Exchange operates, the Register proves it.*
 | Week | Deliverable | Done when |
 |---|---|---|
 | 1 | Design freeze; Anchor workspace; `Config` + `Listing` + timelock + pause; EVM `ListingRegistry` + factory | unit tests green on both stacks |
-| 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Sepolia + Base Sepolia | invariants pass (Trident + Foundry); EVM contracts verified on explorers |
+| 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Sepolia + Base Sepolia | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
 | 3 | Solana P2P escrow (`open/accept/cancel/expire_deal`); deploy program to Devnet; Supabase schema; matching engine; EVM settlement adapters | escrow invariants pass; end-to-end settle on Sepolia from the worker |
 | 4 | Solana settlement adapter; frontend real flow (EVM + Solana wallets) | end-to-end settle on Devnet from the UI |
 | 5 | Register indexer for 3 chains; Vercel deploy; signed order intents (if time) | Register shows real Exchange settlements |

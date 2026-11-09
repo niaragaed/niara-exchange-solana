@@ -228,7 +228,7 @@ Token-2022 extensions give Solana-native securities controls:
 
 ### 3.9 Testing
 
-- Unit/integration: `anchor test` with LiteSVM or Bankrun (fast, deterministic)
+- Unit/integration: LiteSVM (Rust, `cargo test` after `anchor build`; fast, deterministic)
 - Fuzzing: **Trident** (Solana fuzzing framework) — same role Foundry invariant
   fuzzing plays in niara-contracts
 - Invariants (must hold under fuzzing):
@@ -252,6 +252,20 @@ Token-2022 extensions give Solana-native securities controls:
 - FX pricing feeds: P2P deals in `Currency` use the rate the two parties agree;
   no oracle in v1. In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
   VASP rules), which matters for production but not for testnet.
+- **Evaluate `solana-v4`.** v1 builds against the Solana 3.x crates (Anchor's
+  default `solana-v3` feature). Moving to the `solana-v4` (Agave 4.3) crates is a
+  roadmap item, to be evaluated once the program is feature-complete.
+
+### 3.11 Toolchain (pinned)
+
+| Component | Version | Notes |
+|---|---|---|
+| Anchor (CLI + `anchor-lang`/`anchor-spl`) | **1.2.2** | pinned per project in `Anchor.toml` `[toolchain] anchor_version`; installed with `avm` (includes the `close`-into-self and `init_if_needed` Token-2022 fixes) |
+| Solana crates | **3.x** (`solana-v3`, Anchor default) | `solana-v4` not enabled; see roadmap |
+| Solana CLI | **4.3.0** (Agave) | not pinned in `[toolchain]` (pinning `solana_version` switches the machine-wide active release) |
+| Rust | **1.99.1** | `anchor-lang` MSRV is 1.89 |
+| Tests | **LiteSVM** (Rust) | Anchor 1.x default template |
+| TypeScript client | **`@anchor-lang/core`** 1.2.x | replaces `@coral-xyz/anchor` |
 
 ---
 

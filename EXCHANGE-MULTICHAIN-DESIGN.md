@@ -317,6 +317,19 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   niara-contracts. Trident is not used: as of 2026-11 its latest stable release
   (0.12.0) targets Solana 2.3 crates and documents no Anchor 1.x support.
   Re-evaluate if that changes.
+- Implemented (week 2): `tests/test_invariants.rs` builds a world with two
+  `Equity` listings (SPL Token, Token-2022), one `FixedIncome`, one `Credit`
+  and two `Currency` listings, plus a delegated buyer/seller pair for every
+  asset × payment combination (including invalid ones), then runs random
+  sequences of `settle` (valid and invalid markets, zero amounts, replayed
+  ids, wrong signer), listing status changes, pause/unpause, both withdrawals
+  (incl. overdraws and wrong signers), timelocked fee/cashback changes with
+  out-of-range values, re-delegations and `init_cashback_ledger`. Invariants 1,
+  2, 3, 4, 5, 8, 9 and 10 are checked after every step, and the fee ledgers
+  are cross-checked against the sum of `Settled` events. `PROPTEST_CASES`
+  sets the number of sequences (default 48). A mutation check (cashback
+  under-recorded in the `FeeLedger`) made it fail and shrink to a minimal
+  sequence. Invariants 6 and 7 come with the escrow (week 3).
 - Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):

@@ -1,6 +1,9 @@
 //! Shared LiteSVM harness. Requires `anchor build` first (loads the `.so`).
 #![allow(dead_code)]
 
+mod trading;
+pub use trading::*;
+
 use std::str::FromStr;
 
 use anchor_lang::{
@@ -79,8 +82,8 @@ pub struct Env {
     pub svm: LiteSVM,
     pub admin: Keypair,
     pub listing_authority: Keypair,
-    pub operator: Pubkey,
-    pub treasury: Pubkey,
+    pub operator: Keypair,
+    pub treasury: Keypair,
 }
 
 impl Env {
@@ -97,13 +100,17 @@ impl Env {
         let listing_authority = Keypair::new();
         svm.airdrop(&admin.pubkey(), 10_000_000_000).unwrap();
         svm.airdrop(&listing_authority.pubkey(), 10_000_000_000).unwrap();
+        let operator = Keypair::new();
+        let treasury = Keypair::new();
+        svm.airdrop(&operator.pubkey(), 10_000_000_000).unwrap();
+        svm.airdrop(&treasury.pubkey(), 10_000_000_000).unwrap();
 
         let mut env = Env {
             svm,
             admin,
             listing_authority,
-            operator: Pubkey::new_unique(),
-            treasury: Pubkey::new_unique(),
+            operator,
+            treasury,
         };
         let admin_key = env.admin.pubkey();
         env.set_upgrade_authority(Some(admin_key));
@@ -140,8 +147,8 @@ impl Env {
     pub fn default_params(&self) -> InitializeConfigParams {
         InitializeConfigParams {
             listing_authority: self.listing_authority.pubkey(),
-            settlement_operator: self.operator,
-            treasury: self.treasury,
+            settlement_operator: self.operator.pubkey(),
+            treasury: self.treasury.pubkey(),
             fee_bps: FEE_BPS,
             cashback_bps: CASHBACK_BPS,
             timelock_secs: TIMELOCK_SECS,
@@ -412,6 +419,9 @@ impl Env {
                 config: config_pda(),
                 asset_mint: mint,
                 listing: listing_pda(&mint),
+                vault_authority: vault_authority(),
+                fee_vault: fee_vault_pda(&mint),
+                token_program: self.owner_of(&mint),
                 system_program: system_program::ID,
                 event_authority: event_authority(),
                 program: program_id(),

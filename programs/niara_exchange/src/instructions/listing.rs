@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::Mint;
+use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 
 use crate::{
     constants::*,
@@ -73,6 +73,7 @@ pub fn handle_submit_listing(
 /// listings, so the listing authority creates it directly as `Approved`, with no
 /// issuer and no cashback. Unlike asset mints, a currency mint may have a freeze
 /// authority (USDC does): an accepted, curated risk (spec §3.8).
+/// Also creates the currency's fee vault, so `settle` never has to.
 #[event_cpi]
 #[derive(Accounts)]
 pub struct ListCurrency<'info> {
@@ -83,8 +84,9 @@ pub struct ListCurrency<'info> {
         bump = config.bump,
         has_one = listing_authority @ ExchangeError::Unauthorized
     )]
-    pub config: Account<'info, Config>,
-    pub asset_mint: InterfaceAccount<'info, Mint>,
+    pub config: Box<Account<'info, Config>>,
+    #[account(mint::token_program = token_program)]
+    pub asset_mint: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         init,
         payer = listing_authority,
@@ -92,7 +94,23 @@ pub struct ListCurrency<'info> {
         seeds = [LISTING_SEED, asset_mint.key().as_ref()],
         bump
     )]
-    pub listing: Account<'info, Listing>,
+    pub listing: Box<Account<'info, Listing>>,
+    /// CHECK: PDA signer of the fee vaults; holds no data.
+    #[account(seeds = [VAULT_SEED], bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+    /// Fee vault for this currency. A PDA rather than an ATA: anyone can create
+    /// an ATA, so an `init` on one could be front-run to block this listing.
+    #[account(
+        init,
+        payer = listing_authority,
+        seeds = [FEE_VAULT_SEED, asset_mint.key().as_ref()],
+        bump,
+        token::mint = asset_mint,
+        token::authority = vault_authority,
+        token::token_program = token_program
+    )]
+    pub fee_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 

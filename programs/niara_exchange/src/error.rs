@@ -38,4 +38,24 @@ pub enum ExchangeError {
     UnsupportedMintExtension,
     #[msg("Asset mints must not have a freeze authority")]
     FreezeAuthorityNotAllowed,
+    #[msg("Amount must be greater than zero")]
+    ZeroAmount,
+    #[msg("Buyer and seller must be different")]
+    SelfTrade,
+    #[msg("The vault authority cannot be a counterparty")]
+    InvalidCounterparty,
+    #[msg("Listing does not match the mint")]
+    InvalidListing,
+    #[msg("Listing is not approved")]
+    ListingNotApproved,
+    #[msg("Asset class is not traded in this mode")]
+    WrongTradingMode,
+    #[msg("Payment mint is not an approved Currency listing")]
+    InvalidPaymentMint,
+    #[msg("Token account has not delegated to the vault authority")]
+    DelegateNotSet,
+    #[msg("Delegated amount is lower than the settlement amount")]
+    InsufficientDelegation,
+    #[msg("Listing is not eligible for cashback")]
+    NotCashbackEligible,
 }

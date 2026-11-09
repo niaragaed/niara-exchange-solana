@@ -186,6 +186,41 @@ pub struct Listing {
     pub bump: u8,
 }
 
+impl Listing {
+    /// The only listings accepted as a payment mint (invariant 10).
+    pub fn is_approved_currency(&self) -> bool {
+        self.asset_class == AssetClass::Currency && self.status == ListingStatus::Approved
+    }
+}
+
+/// Issuer cashback owed for one listing, in one payment mint.
+/// PDA: `["cashback", listing, payment_mint]`. Created by `init_cashback_ledger`.
+#[account]
+#[derive(InitSpace)]
+pub struct CashbackLedger {
+    pub listing: Pubkey,
+    pub payment_mint: Pubkey,
+    pub accrued: u64,
+    pub withdrawn: u64,
+    pub bump: u8,
+}
+
+impl CashbackLedger {
+    pub fn available(&self) -> Result<u64> {
+        self.accrued
+            .checked_sub(self.withdrawn)
+            .ok_or_else(|| error!(ExchangeError::MathOverflow))
+    }
+}
+
+/// Replay guard for one settled match. PDA: `["settled", order_id]`.
+/// Never closed: closing it would allow the same `order_id` to settle again.
+#[account]
+#[derive(InitSpace)]
+pub struct SettlementRecord {
+    pub bump: u8,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

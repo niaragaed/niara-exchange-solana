@@ -16,8 +16,8 @@ fn initialize_config_stores_params() {
     let config: Config = env.fetch(&config_pda());
     assert_eq!(config.admin, env.admin.pubkey());
     assert_eq!(config.listing_authority, env.listing_authority.pubkey());
-    assert_eq!(config.settlement_operator, env.operator);
-    assert_eq!(config.treasury, env.treasury);
+    assert_eq!(config.settlement_operator, env.operator.pubkey());
+    assert_eq!(config.treasury, env.treasury.pubkey());
     assert_eq!(config.fee_bps, FEE_BPS);
     assert_eq!(config.cashback_bps, CASHBACK_BPS);
     assert_eq!(config.timelock_secs, TIMELOCK_SECS);

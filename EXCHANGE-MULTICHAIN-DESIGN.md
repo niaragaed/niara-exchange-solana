@@ -116,11 +116,12 @@ interface SettlementAdapter {
 | `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
 | `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `bump` |
-| `CashbackLedger` | `["cashback", listing, payment_mint]` | `accrued: u64`, `withdrawn: u64`, `bump` |
+| `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
+| `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent |
 | `Deal` | `["deal", proposer, deal_id]` | `proposer`, `counterparty` (or open), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `bump` |
 | Deal vault | ATA(Deal PDA, deposited mint) | holds the proposer's deposit until accept/cancel/expiry |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
-| Fee vault | ATA(vault authority, payment_mint) | holds protocol fees + unclaimed cashback |
+| Fee vault | `["fee_vault", payment_mint]` token account, authority = vault authority | holds protocol fees + unclaimed cashback. Created by `list_currency`, so every `Approved` currency has one. A PDA rather than an ATA: anyone can create an ATA, so an `init` on one could be front-run to block `list_currency` |
 
 ### 3.3 Instructions
 
@@ -130,7 +131,8 @@ interface SettlementAdapter {
 | `submit_listing(asset_class, doc_hash)` | issuer | create `Listing{Pending}` for `Equity`/`FixedIncome`/`Credit`; require `issuer == asset_mint.mint_authority` |
 | `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false` |
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
-| `settle(order_id, asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates (see 3.4) |
+| `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, payment mint) before its first settlement |
+| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates (see 3.4) |
 | `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: proposer deposits its side into the deal vault |
 | `accept_deal` | counterparty | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges fee, accrues cashback, closes vault (see 3.5) |
 | `cancel_deal` | proposer (while `Open`) | refund deposit, close vault |
@@ -142,10 +144,25 @@ interface SettlementAdapter {
 
 ### 3.4 `settle` — the core
 
+`order_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
+`matches.id` primary key), not the maker's order id: one order can be filled by
+several matches, and each match settles at most once. `payment_amount` is in
+raw units of the payment mint; the program does no price conversion.
+
 Preconditions (all enforced on-chain):
 - `!config.paused`; signer is `config.settlement_operator`
-- `listing.status == Approved` and `listing.asset_mint == asset_mint`
-- token accounts: correct owner, correct mint, correct token program
+- `asset_amount > 0`, `payment_amount > 0`
+- `buyer != seller`; neither is the vault authority
+- `["settled", order_id]` does not exist yet (replay guard: the operator
+  cannot settle the same match twice, even within the delegated amounts)
+- asset listing: `status == Approved`, `asset_class == Equity`,
+  `listing.asset_mint == asset_mint`
+- payment mint: has a listing with `asset_class == Currency` and
+  `status == Approved`
+- mint policy re-run on both mints (extension allowlist; asset mint has no
+  freeze authority)
+- token accounts: correct owner (buyer/seller wallet), correct mint, correct
+  token program; fee vault and cashback ledger are the PDAs for this pair
 - seller's asset account `delegate == vault_authority` and `delegated_amount ≥ asset_amount`
 - buyer's payment account `delegate == vault_authority` and `delegated_amount ≥ payment_amount`
 
@@ -156,7 +173,9 @@ cashback = listing.cashback_eligible ? floor(fee * cashback_bps / 10_000) : 0
 seller_receives = payment_amount - fee
 ```
 
-CPIs, all in one transaction (atomic — any failure reverts everything):
+CPIs, all in one transaction (atomic — any failure reverts everything).
+Each `transfer_checked` uses its own mint's decimals; zero-amount legs (e.g.
+`fee` when `fee_bps == 0`) are skipped:
 1. `transfer_checked` asset: seller → buyer (authority = vault PDA as delegate)
 2. `transfer_checked` payment: buyer → seller, `seller_receives`
 3. `transfer_checked` payment: buyer → fee vault, `fee`
@@ -360,7 +379,9 @@ Minimal schema:
 Settlement worker: Node/TS service (Railway, same pattern as the Register indexer).
 - Holds **one operator key per chain**, funded with minimal test balance.
 - Operator keys **never** in the frontend, never in `NEXT_PUBLIC_*`, never in git.
-- Idempotent: a match is settled at most once (unique constraint on `match_id`).
+- Idempotent: a match is settled at most once (unique constraint on `match_id`
+  off-chain; on Solana also on-chain, since `settle` takes the match UUID as
+  `order_id` and creates `["settled", order_id]`).
 
 ---
 

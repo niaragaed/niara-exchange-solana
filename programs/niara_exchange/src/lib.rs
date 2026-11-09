@@ -7,6 +7,7 @@ pub mod constants;
 pub mod error;
 pub mod events;
 pub mod instructions;
+pub mod math;
 pub mod mint_policy;
 pub mod state;
 
@@ -77,5 +78,21 @@ pub mod niara_exchange {
 
     pub fn delist(ctx: Context<UpdateListingStatus>) -> Result<()> {
         instructions::listing::handle_delist(ctx)
+    }
+
+    // ---- Order-book settlement and cashback ------------------------------
+
+    pub fn init_cashback_ledger(ctx: Context<InitCashbackLedger>) -> Result<()> {
+        instructions::cashback::handle_init_cashback_ledger(ctx)
+    }
+
+    /// `order_id` is the off-chain match (fill) id; each settles at most once.
+    pub fn settle(
+        ctx: Context<Settle>,
+        order_id: [u8; 16],
+        asset_amount: u64,
+        payment_amount: u64,
+    ) -> Result<()> {
+        instructions::settle::handle_settle(ctx, order_id, asset_amount, payment_amount)
     }
 }

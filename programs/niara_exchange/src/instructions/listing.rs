@@ -5,6 +5,7 @@ use crate::{
     constants::*,
     error::ExchangeError,
     events::{ListingApproved, ListingDelisted, ListingSubmitted, ListingSuspended},
+    mint_policy::require_allowed_mint_extensions,
     state::*,
 };
 
@@ -37,6 +38,7 @@ pub fn handle_submit_listing(
         ExchangeError::CurrencyNotSubmittable
     );
     require!(doc_hash != [0u8; 32], ExchangeError::EmptyDocHash);
+    require_allowed_mint_extensions(&ctx.accounts.asset_mint.to_account_info())?;
 
     let issuer = ctx.accounts.issuer.key();
     let mint_authority: Option<Pubkey> = ctx.accounts.asset_mint.mint_authority.into();
@@ -93,6 +95,7 @@ pub struct ListCurrency<'info> {
 }
 
 pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
+    require_allowed_mint_extensions(&ctx.accounts.asset_mint.to_account_info())?;
     let now = Clock::get()?.unix_timestamp;
     let asset_class = AssetClass::Currency;
     let listing = Listing {

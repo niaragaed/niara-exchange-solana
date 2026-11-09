@@ -34,4 +34,6 @@ pub enum ExchangeError {
     EmptyDocHash,
     #[msg("Listing status transition is not allowed")]
     InvalidStatusTransition,
+    #[msg("Mint has a Token-2022 extension outside the allowlist (MetadataPointer, TokenMetadata)")]
+    UnsupportedMintExtension,
 }

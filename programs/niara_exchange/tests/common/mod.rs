@@ -10,7 +10,21 @@ use anchor_lang::{
     },
     AccountDeserialize, AnchorDeserialize, Discriminator, InstructionData, ToAccountMetas,
 };
-use anchor_spl::token::spl_token::state::Mint;
+use anchor_spl::{
+    compat::spl_token_metadata_interface::state::TokenMetadata,
+    token::spl_token::state::Mint,
+    token_2022::spl_token_2022::{
+        extension::{
+            confidential_transfer::ConfidentialTransferMint,
+            default_account_state::DefaultAccountState, metadata_pointer::MetadataPointer,
+            mint_close_authority::MintCloseAuthority, non_transferable::NonTransferable,
+            pausable::PausableConfig, permanent_delegate::PermanentDelegate,
+            transfer_fee::TransferFeeConfig, transfer_hook::TransferHook,
+            BaseStateWithExtensionsMut, ExtensionType, StateWithExtensionsMut,
+        },
+        state::Mint as Mint2022,
+    },
+};
 use litesvm::{
     types::{TransactionMetadata, TransactionResult},
     LiteSVM,
@@ -200,6 +214,85 @@ impl Env {
         mint
     }
 
+    /// Writes an initialized Token-2022 mint carrying `extensions`, using the
+    /// real Token-2022 account layout. `TokenMetadata` is variable-length and is
+    /// written after the fixed-size extensions. Extension contents are default
+    /// values: the listing policy only looks at extension types.
+    pub fn create_mint_2022(
+        &mut self,
+        authority: Option<Pubkey>,
+        extensions: &[ExtensionType],
+    ) -> Pubkey {
+        let mint = Pubkey::new_unique();
+        let fixed: Vec<ExtensionType> = extensions
+            .iter()
+            .copied()
+            .filter(|e| *e != ExtensionType::TokenMetadata)
+            .collect();
+        let metadata = extensions
+            .contains(&ExtensionType::TokenMetadata)
+            .then(|| TokenMetadata {
+                mint,
+                name: "Niara Test Asset".into(),
+                symbol: "NTST".into(),
+                uri: "https://example.com/ntst.json".into(),
+                ..Default::default()
+            });
+
+        let mut len = if fixed.is_empty() && metadata.is_some() {
+            BASE_ACCOUNT_AND_TYPE_LENGTH
+        } else {
+            ExtensionType::try_calculate_account_len::<Mint2022>(&fixed).unwrap()
+        };
+        if let Some(m) = &metadata {
+            len += m.tlv_size_of().unwrap();
+        }
+
+        let mut data = vec![0u8; len];
+        let mut state = StateWithExtensionsMut::<Mint2022>::unpack_uninitialized(&mut data).unwrap();
+        for ext in &fixed {
+            init_fixed_extension(&mut state, *ext);
+        }
+        if let Some(m) = &metadata {
+            state.init_variable_len_extension(m, false).unwrap();
+        }
+        state.base = Mint2022 {
+            mint_authority: authority.map_or(COption::None, COption::Some),
+            supply: 0,
+            decimals: 6,
+            is_initialized: true,
+            freeze_authority: COption::None,
+        };
+        state.pack_base();
+        if !extensions.is_empty() {
+            state.init_account_type().unwrap();
+        }
+
+        let lamports = self.svm.minimum_balance_for_rent_exemption(len);
+        self.svm
+            .set_account(
+                mint,
+                Account {
+                    lamports,
+                    data,
+                    owner: anchor_spl::token_2022::ID,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        mint
+    }
+
+    /// Overwrites the type tag of the first TLV entry of a Token-2022 mint with a
+    /// value no known extension uses.
+    pub fn corrupt_first_extension_type(&mut self, mint: &Pubkey) {
+        let mut account = self.svm.get_account(mint).unwrap();
+        let at = BASE_ACCOUNT_AND_TYPE_LENGTH;
+        account.data[at..at + 2].copy_from_slice(&UNKNOWN_EXTENSION_TYPE.to_le_bytes());
+        self.svm.set_account(*mint, account).unwrap();
+    }
+
     // ---- instruction wrappers ------------------------------------------
 
     pub fn initialize_config(
@@ -341,7 +434,8 @@ impl Env {
 }
 
 /// Asserts the transaction failed with the given custom program error code.
-pub fn assert_custom_err(res: TransactionResult, code: impl Into<u32>) {
+/// Returns the program logs for further checks.
+pub fn assert_custom_err(res: TransactionResult, code: impl Into<u32>) -> Vec<String> {
     let code = code.into();
     let err = res.expect_err("transaction should have failed");
     let dbg = format!("{:?}", err.err);
@@ -350,6 +444,46 @@ pub fn assert_custom_err(res: TransactionResult, code: impl Into<u32>) {
         "expected Custom({code}), got {dbg}\nlogs: {:#?}",
         err.meta.logs
     );
+    err.meta.logs
+}
+
+pub const UNKNOWN_EXTENSION_TYPE: u16 = 0xFFF0;
+
+/// Token-2022 layout: base state padded to the token-account length, then a
+/// one-byte account type, then the TLV extension entries.
+const BASE_ACCOUNT_AND_TYPE_LENGTH: usize = anchor_spl::token::spl_token::state::Account::LEN + 1;
+
+fn init_fixed_extension(state: &mut StateWithExtensionsMut<Mint2022>, ext: ExtensionType) {
+    match ext {
+        ExtensionType::PermanentDelegate => {
+            state.init_extension::<PermanentDelegate>(true).unwrap();
+        }
+        ExtensionType::TransferFeeConfig => {
+            state.init_extension::<TransferFeeConfig>(true).unwrap();
+        }
+        ExtensionType::TransferHook => {
+            state.init_extension::<TransferHook>(true).unwrap();
+        }
+        ExtensionType::DefaultAccountState => {
+            state.init_extension::<DefaultAccountState>(true).unwrap();
+        }
+        ExtensionType::Pausable => {
+            state.init_extension::<PausableConfig>(true).unwrap();
+        }
+        ExtensionType::NonTransferable => {
+            state.init_extension::<NonTransferable>(true).unwrap();
+        }
+        ExtensionType::ConfidentialTransferMint => {
+            state.init_extension::<ConfidentialTransferMint>(true).unwrap();
+        }
+        ExtensionType::MintCloseAuthority => {
+            state.init_extension::<MintCloseAuthority>(true).unwrap();
+        }
+        ExtensionType::MetadataPointer => {
+            state.init_extension::<MetadataPointer>(true).unwrap();
+        }
+        other => panic!("fixture does not support {other:?}"),
+    }
 }
 
 /// Decodes `emit_cpi!` events of type `E` from a transaction's inner instructions.

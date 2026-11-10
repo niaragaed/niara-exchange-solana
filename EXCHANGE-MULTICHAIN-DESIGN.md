@@ -417,19 +417,36 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   four issuer listings: `request_issuance` (incl. zero amounts, wrong
   signers, suspended/delisted listings), `approve_issuance`/`reject_issuance`
   of the oldest open batch (incl. wrong signers, non-`Approved` listings,
-  paused protocol) and `burn_with_reason` (incl. overdraws). Invariants 1, 2,
-  3, 4, 5, 8, 9, 10 and 11 are checked after every step (4 as `vault ==
+  paused protocol) and `burn_with_reason` (incl. overdraws). Invariants 1 to
+  11 are checked after every step (4 as `vault ==
   unwithdrawn + unswept donations`, so strict equality after every sweep; 11
   also checks the mint authority is still the program PDA), the fee ledgers
   are cross-checked against the sum of `Settled` events, and
   `issued`/`burned` against `IssuanceExecuted`/`TokensBurned`. `PROPTEST_CASES`
   sets the number of sequences (default 48). A mutation check (cashback
   under-recorded in the `FeeLedger`) made it fail and shrink to a minimal
-  sequence. Invariants 6 and 7 come with the escrow (week 3).
+  sequence.
 - Escrow (week 3): `tests/test_deal.rs` covers every class × side × token
   program combination, the expiry boundary, replays, pause and listing status
   (blocking open/accept, never cancel/expire), every authorization and
-  account check, and tokens sent straight into a deal vault.
+  account check, and tokens sent straight into a deal vault. The invariant
+  fuzzer mixes random deals into the sequences above: one proposer /
+  counterparty pair per P2P pair (six valid markets, including both
+  `Currency` directions, and five invalid ones: `Equity` asset, `Equity` or
+  `FixedIncome` payment, same mint), `open_deal` with zero amounts, reused
+  ids and expiries in and out of the 30-day window, then `accept_deal`,
+  `cancel_deal` and `expire_deal` on tracked deals (wrong signers, a crank
+  naming its own refund account, replays of resolved deals) and donations
+  into deal vaults. The outcome of every escrow call is predicted exactly
+  from the model (status, pause, listings, clock, fee), so invariant 7 and the
+  pause principle are checked on every call; invariant 6 is checked after
+  every step by modelling every party's balances (a deposit stranded or paid
+  twice breaks the model), requiring each open deal's vault to hold exactly
+  its deposit plus donations and each resolved deal's vault to be closed.
+  `DealExecuted` fees and cashback feed the same fee-ledger cross-check as
+  `Settled`. A deterministic test accepts, cancels and expires one deal per
+  valid pair and side. Mutation check: refunding the deposit without the
+  donated excess in the model made both tests fail and shrink.
 - Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):

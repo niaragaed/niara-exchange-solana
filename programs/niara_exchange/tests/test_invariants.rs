@@ -1,7 +1,6 @@
 //! Invariant fuzzing (spec §3.9): `proptest` drives random sequences of valid
 //! and invalid instructions against the real `.so` in LiteSVM, and checks
-//! invariants 1, 2, 3, 4, 5, 8, 9 and 10 after every step. (Escrow invariants
-//! 6 and 7 arrive with the P2P escrow.)
+//! invariants 1 to 11 after every step.
 //!
 //! Each case builds a fresh world:
 //! - listings: two `Equity` (SPL Token, Token-2022), one `FixedIncome`, one
@@ -20,6 +19,16 @@
 //! issuer listings. Their trader fixtures hold balances written directly
 //! (outside supply); issuance goes to a separate holder per listing, and only
 //! that holder burns, so `supply == issued - burned` stays exact.
+//!
+//! P2P escrow (invariants 6 and 7): random `open_deal` on valid and invalid
+//! pairs (Equity asset, non-Currency payment, same mint), with expiries in
+//! and out of the 30-day window, then `accept_deal`, `cancel_deal` and
+//! `expire_deal` on tracked deals (incl. wrong signers, a crank redirecting
+//! the refund, replays of resolved deals) and donations into deal vaults.
+//! The outcome of every escrow call is predicted exactly; the balances of
+//! every deal party are modelled, so a deposit that is stranded or paid twice
+//! fails the run, and each vault must hold exactly its deposit while the deal
+//! is open and be closed afterwards.
 //! `PROPTEST_CASES` overrides the number of cases (default 48).
 
 mod common;
@@ -32,10 +41,10 @@ use std::{
 use anchor_lang::prelude::Pubkey;
 use common::*;
 use niara_exchange::{
-    events::{IssuanceExecuted, Settled, TokensBurned},
+    events::{DealExecuted, DealOpened, IssuanceExecuted, Settled, TokensBurned},
     math::split_payment,
-    AssetClass, BurnReason, CashbackLedger, Config, ConfigChange, Listing, ListingStatus,
-    BPS_DENOMINATOR, MAX_FEE_BPS,
+    AssetClass, BurnReason, CashbackLedger, Config, ConfigChange, DealSide, DealStatus, Listing,
+    ListingStatus, BPS_DENOMINATOR, MAX_DEAL_DURATION_SECS, MAX_FEE_BPS,
 };
 use proptest::{
     prelude::*,
@@ -74,6 +83,22 @@ const PAIRS: [(usize, usize); 14] = [
 ];
 const VALID_PAIRS: usize = 4;
 
+/// (asset, payment) of every P2P pair. The first six are valid markets.
+const DEAL_PAIRS: [(usize, usize); 11] = [
+    (FI, USD),
+    (FI, BRL),
+    (CR, USD),
+    (CR, BRL),
+    (USD, BRL), // Currency deal: BRL bought with USD
+    (BRL, USD),
+    (E0, USD), // invariant 8: Equity never trades P2P
+    (E1, BRL),
+    (FI, E0), // invariant 10: Equity as payment
+    (CR, FI), // invariant 10: non-Currency payment
+    (USD, USD), // same mint
+];
+const VALID_DEAL_PAIRS: usize = 6;
+
 const ASSET_BALANCE: u64 = 1_000_000_000;
 const PAYMENT_BALANCE: u64 = 1_000_000_000_000_000;
 
@@ -86,6 +111,13 @@ static SWEEP_OK: AtomicU64 = AtomicU64::new(0);
 static SWEEP_REJECTED: AtomicU64 = AtomicU64::new(0);
 static ISSUE_OK: AtomicU64 = AtomicU64::new(0);
 static BURN_OK: AtomicU64 = AtomicU64::new(0);
+static DEAL_OPEN_OK: AtomicU64 = AtomicU64::new(0);
+static DEAL_OPEN_REJECTED: AtomicU64 = AtomicU64::new(0);
+static DEAL_ACCEPT_OK: AtomicU64 = AtomicU64::new(0);
+static DEAL_ACCEPT_REJECTED: AtomicU64 = AtomicU64::new(0);
+static DEAL_CANCEL_OK: AtomicU64 = AtomicU64::new(0);
+static DEAL_EXPIRE_OK: AtomicU64 = AtomicU64::new(0);
+static DEAL_REFUND_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum StatusOp {
@@ -127,6 +159,29 @@ enum Action {
     ResolveIssuance { listing: usize, approve: bool, intruder: bool },
     /// The listing's holder burns `permille` of its balance (above 1000 overdraws).
     Burn { listing: usize, permille: u16, redemption: bool },
+    /// `id` comes from a small space (32) so reopened ids still happen.
+    OpenDeal { pair: usize, sell: bool, assets: u64, payment: u64, ttl: i64, id: u8 },
+    /// `deal` picks a tracked deal (mostly an open one).
+    AcceptDeal { deal: usize, intruder: bool },
+    CancelDeal { deal: usize, intruder: bool },
+    /// `thief`: the crank names its own account as the refund destination.
+    ExpireDeal { deal: usize, thief: bool },
+    /// Unaccounted transfer straight into an open deal's vault.
+    DonateToDeal { deal: usize, amount: u64 },
+}
+
+/// The model of one deal opened during the run.
+#[derive(Clone, Debug)]
+struct TrackedDeal {
+    pair: usize,
+    id: [u8; 16],
+    side: DealSide,
+    assets: u64,
+    payment: u64,
+    expires_at: i64,
+    status: DealStatus,
+    /// Tokens donated into the vault while open.
+    excess: u64,
 }
 
 /// Listings with an issuer, so with Niara-approved issuance.
@@ -179,6 +234,34 @@ fn action() -> impl Strategy<Value = Action> {
             permille,
             intruder,
         });
+    let deal_pair = prop_oneof![4 => 0..VALID_DEAL_PAIRS, 1 => 0..DEAL_PAIRS.len()];
+    let ttl = prop_oneof![
+        8 => 1i64..2 * TIMELOCK_SECS,
+        1 => -100i64..=0,
+        1 => Just(MAX_DEAL_DURATION_SECS),
+        1 => Just(MAX_DEAL_DURATION_SECS + 1),
+    ];
+    let deal_payment = prop_oneof![
+        8 => 1u64..10_000_000_000,
+        2 => 1u64..20_000,
+        1 => Just(0u64),
+    ];
+    let open_deal = (
+        deal_pair,
+        any::<bool>(),
+        prop_oneof![12 => 1u64..1_000, 1 => Just(0u64)],
+        deal_payment,
+        ttl,
+        0u8..32,
+    )
+        .prop_map(|(pair, sell, assets, payment, ttl, id)| Action::OpenDeal {
+            pair,
+            sell,
+            assets,
+            payment,
+            ttl,
+            id,
+        });
     let bps = prop_oneof![3 => 0u16..=MAX_FEE_BPS, 1 => any::<u16>()];
     let cashback_bps = prop_oneof![3 => 0u16..=BPS_DENOMINATOR, 1 => any::<u16>()];
     prop_oneof![
@@ -192,7 +275,7 @@ fn action() -> impl Strategy<Value = Action> {
         1 => cashback_bps.prop_map(Action::ProposeCashback),
         1 => Just(Action::ExecuteFee),
         1 => Just(Action::ExecuteCashback),
-        1 => (0i64..2 * TIMELOCK_SECS).prop_map(Action::Warp),
+        2 => (0i64..2 * TIMELOCK_SECS).prop_map(Action::Warp),
         1 => (0..PAIRS.len(), any::<bool>(), 0u64..2_000)
             .prop_map(|(pair, seller_side, amount)| Action::Delegate { pair, seller_side, amount }),
         1 => (0..LISTINGS, prop::sample::select(vec![USD, BRL, E0]))
@@ -231,6 +314,15 @@ fn action() -> impl Strategy<Value = Action> {
                 permille,
                 redemption,
             }),
+        6 => open_deal,
+        5 => (any::<usize>(), prop::bool::weighted(0.1))
+            .prop_map(|(deal, intruder)| Action::AcceptDeal { deal, intruder }),
+        2 => (any::<usize>(), prop::bool::weighted(0.1))
+            .prop_map(|(deal, intruder)| Action::CancelDeal { deal, intruder }),
+        2 => (any::<usize>(), prop::bool::weighted(0.1))
+            .prop_map(|(deal, thief)| Action::ExpireDeal { deal, thief }),
+        1 => (any::<usize>(), 1u64..1_000)
+            .prop_map(|(deal, amount)| Action::DonateToDeal { deal, amount }),
     ]
 }
 
@@ -256,6 +348,13 @@ struct World {
     open_batches: HashMap<usize, Vec<u64>>,
     /// Per issuer listing: (Σ `IssuanceExecuted`, Σ `TokensBurned`).
     issuance: HashMap<usize, (u64, u64)>,
+    /// One proposer/counterparty pair per `DEAL_PAIRS` entry.
+    deal_parties: Vec<P2p>,
+    /// The intruder's (asset, payment) accounts per deal pair.
+    intruder_accounts: Vec<(Pubkey, Pubkey)>,
+    deals: Vec<TrackedDeal>,
+    /// Modelled balance of every deal party's token accounts (invariant 6).
+    party_balances: HashMap<Pubkey, u64>,
 }
 
 impl World {
@@ -338,7 +437,35 @@ impl World {
         }
 
         let intruder = env.funded_keypair();
+        let mut deal_parties = Vec::new();
+        let mut intruder_accounts = Vec::new();
+        let mut party_balances = HashMap::new();
+        for &(asset, payment) in &DEAL_PAIRS {
+            let p = env.p2p_parties(mints[asset], mints[payment], issuers[asset].insecure_clone());
+            for (account, amount) in [
+                (p.proposer_asset, P2P_ASSETS),
+                (p.proposer_payment, P2P_PAYMENT),
+                (p.counterparty_asset, P2P_ASSETS),
+                (p.counterparty_payment, P2P_PAYMENT),
+            ] {
+                party_balances.insert(account, amount);
+            }
+            let intruder_asset =
+                env.create_token_account(p.asset_program, p.asset_mint, intruder.pubkey(), P2P_ASSETS);
+            let intruder_payment = env.create_token_account(
+                p.payment_program,
+                p.payment_mint,
+                intruder.pubkey(),
+                P2P_PAYMENT,
+            );
+            intruder_accounts.push((intruder_asset, intruder_payment));
+            deal_parties.push(p);
+        }
         World {
+            deal_parties,
+            intruder_accounts,
+            deals: Vec::new(),
+            party_balances,
             holders,
             open_batches: ISSUER_LISTINGS.iter().map(|&l| (l, Vec::new())).collect(),
             issuance: ISSUER_LISTINGS.iter().map(|&l| (l, (0, 0))).collect(),
@@ -463,6 +590,18 @@ impl World {
                 permille,
                 redemption,
             } => self.burn(listing, permille, redemption)?,
+            Action::OpenDeal {
+                pair,
+                sell,
+                assets,
+                payment,
+                ttl,
+                id,
+            } => self.open_deal(pair, sell, assets, payment, ttl, id)?,
+            Action::AcceptDeal { deal, intruder } => self.accept_deal(deal, intruder)?,
+            Action::CancelDeal { deal, intruder } => self.cancel_deal(deal, intruder)?,
+            Action::ExpireDeal { deal, thief } => self.expire_deal(deal, thief)?,
+            Action::DonateToDeal { deal, amount } => self.donate_to_deal(deal, amount),
         }
         Ok(())
     }
@@ -810,6 +949,366 @@ impl World {
         }
     }
 
+    // ---- P2P escrow (invariants 6 and 7) -------------------------------------
+
+    /// Index of a tracked deal: mostly an open one, sometimes any (replays).
+    fn pick_deal(&self, pick: usize) -> Option<usize> {
+        let open: Vec<usize> = (0..self.deals.len())
+            .filter(|&i| self.deals[i].status == DealStatus::Open)
+            .collect();
+        if !open.is_empty() && pick % 4 != 0 {
+            Some(open[pick % open.len()])
+        } else if !self.deals.is_empty() {
+            Some(pick % self.deals.len())
+        } else {
+            None
+        }
+    }
+
+    fn credit(&mut self, account: Pubkey, amount: u64) {
+        *self.party_balances.get_mut(&account).unwrap() += amount;
+    }
+
+    fn debit(&mut self, account: Pubkey, amount: u64) {
+        *self.party_balances.get_mut(&account).unwrap() -= amount;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_deal(
+        &mut self,
+        pair: usize,
+        sell: bool,
+        assets: u64,
+        payment: u64,
+        ttl: i64,
+        id: u8,
+    ) -> Result<(), TestCaseError> {
+        let (asset_index, payment_index) = DEAL_PAIRS[pair];
+        let side = if sell { DealSide::Sell } else { DealSide::Buy };
+        let id = deal_id(id as u128);
+        let deal_key = self.deal_parties[pair].deal(id);
+        let existed = self.env.exists(&deal_key);
+        let config = self.config();
+        let asset_listing = self.listing(asset_index);
+        let payment_listing = self.listing(payment_index);
+        let now = self.env.now();
+        let expires_at = now.saturating_add(ttl);
+        let split = split_payment(
+            payment,
+            config.fee_bps,
+            config.cashback_bps,
+            asset_listing.cashback_eligible,
+        )
+        .unwrap();
+        let expected_ok = !config.paused
+            && assets > 0
+            && payment > 0
+            && ttl > 0
+            && ttl <= MAX_DEAL_DURATION_SECS
+            && asset_index != payment_index
+            && asset_listing.status == ListingStatus::Approved
+            && asset_listing.asset_class.is_p2p()
+            && payment_listing.is_approved_currency()
+            && split.seller_receives > 0
+            && !existed;
+
+        let p = &self.deal_parties[pair];
+        let res = self
+            .env
+            .open_deal_at(p, id, side, assets, payment, expires_at);
+        prop_assert_eq!(
+            res.is_ok(),
+            expected_ok,
+            "open_deal pair {} {:?} {}/{} ttl {}: {:?}",
+            pair,
+            side,
+            assets,
+            payment,
+            ttl,
+            res.as_ref().err().map(|e| &e.err)
+        );
+        let meta = match res {
+            Err(_) => {
+                DEAL_OPEN_REJECTED.fetch_add(1, Relaxed);
+                prop_assert_eq!(self.env.exists(&deal_key), existed);
+                return Ok(());
+            }
+            Ok(meta) => meta,
+        };
+        DEAL_OPEN_OK.fetch_add(1, Relaxed);
+        // Invariants 3, 8 and 10 at open.
+        prop_assert_eq!(asset_listing.status, ListingStatus::Approved);
+        prop_assert!(asset_listing.asset_class.is_p2p(), "Equity opened as a deal");
+        prop_assert!(payment_listing.is_approved_currency());
+        let e = &events::<DealOpened>(&meta)[0];
+        prop_assert_eq!((e.asset_amount, e.payment_amount, e.expires_at), (assets, payment, expires_at));
+
+        let deposit = if sell { assets } else { payment };
+        let account = self.deal_parties[pair].deposit_account(side);
+        self.debit(account, deposit);
+        self.deals.push(TrackedDeal {
+            pair,
+            id,
+            side,
+            assets,
+            payment,
+            expires_at,
+            status: DealStatus::Open,
+            excess: 0,
+        });
+        Ok(())
+    }
+
+    fn accept_deal(&mut self, pick: usize, intruder: bool) -> Result<(), TestCaseError> {
+        match self.pick_deal(pick) {
+            Some(index) => self.accept_deal_at(index, intruder),
+            None => Ok(()),
+        }
+    }
+
+    fn accept_deal_at(&mut self, index: usize, intruder: bool) -> Result<(), TestCaseError> {
+        let d = self.deals[index].clone();
+        let (asset_index, payment_index) = DEAL_PAIRS[d.pair];
+        let config = self.config();
+        let asset_listing = self.listing(asset_index);
+        let payment_listing = self.listing(payment_index);
+        let now = self.env.now();
+        let split = split_payment(
+            d.payment,
+            config.fee_bps,
+            config.cashback_bps,
+            asset_listing.cashback_eligible,
+        )
+        .unwrap();
+        let expected_ok = !intruder
+            && d.status == DealStatus::Open
+            && !config.paused
+            && now < d.expires_at
+            && asset_listing.status == ListingStatus::Approved
+            && payment_listing.is_approved_currency()
+            && split.seller_receives > 0;
+
+        let p = &self.deal_parties[d.pair];
+        let res = if intruder {
+            let signer = self.intruder.insecure_clone();
+            let (asset_account, payment_account) = self.intruder_accounts[d.pair];
+            let mut a = self.env.accept_deal_accounts(p, d.id);
+            a.counterparty = signer.pubkey();
+            a.counterparty_asset = asset_account;
+            a.counterparty_payment = payment_account;
+            self.env.accept_deal_with(&signer, &a)
+        } else {
+            self.env.accept_deal(p, d.id)
+        };
+        // Invariant 7: never after expires_at.
+        if now >= d.expires_at {
+            prop_assert!(res.is_err(), "deal accepted at {now} >= expires_at {}", d.expires_at);
+        }
+        prop_assert_eq!(
+            res.is_ok(),
+            expected_ok,
+            "accept_deal {:?}: {:?}",
+            d,
+            res.as_ref().err().map(|e| &e.err)
+        );
+        let meta = match res {
+            Err(_) => {
+                DEAL_ACCEPT_REJECTED.fetch_add(1, Relaxed);
+                return Ok(());
+            }
+            Ok(meta) => meta,
+        };
+        DEAL_ACCEPT_OK.fetch_add(1, Relaxed);
+        // Invariants 3, 8, 9 and 10 at execution.
+        prop_assert_eq!(asset_listing.status, ListingStatus::Approved);
+        prop_assert!(asset_listing.asset_class.is_p2p());
+        prop_assert!(payment_listing.is_approved_currency());
+        let e = &events::<DealExecuted>(&meta)[0];
+        prop_assert_eq!((e.fee, e.cashback), (split.fee, split.cashback));
+        prop_assert_eq!(e.vault_excess, d.excess);
+        if asset_listing.asset_class == AssetClass::Currency {
+            prop_assert_eq!(e.cashback, 0, "cashback on a Currency deal");
+        }
+        // Invariant 1.
+        prop_assert_eq!(d.payment, split.seller_receives + split.fee);
+
+        // Invariant 6: the deposit (and any excess) went to the counterparty.
+        let p = &self.deal_parties[d.pair];
+        let (pa, pp, ca, cp) = (
+            p.proposer_asset,
+            p.proposer_payment,
+            p.counterparty_asset,
+            p.counterparty_payment,
+        );
+        match d.side {
+            DealSide::Sell => {
+                self.credit(ca, d.assets + d.excess);
+                self.debit(cp, d.payment);
+                self.credit(pp, split.seller_receives);
+            }
+            DealSide::Buy => {
+                self.debit(ca, d.assets);
+                self.credit(pa, d.assets);
+                self.credit(cp, split.seller_receives + d.excess);
+            }
+        }
+        let entry = self.model.get_mut(&payment_index).expect("payment is a currency");
+        entry.0 += split.fee;
+        entry.1 += split.cashback;
+        self.deals[index].status = DealStatus::Executed;
+        Ok(())
+    }
+
+    fn cancel_deal(&mut self, pick: usize, intruder: bool) -> Result<(), TestCaseError> {
+        match self.pick_deal(pick) {
+            Some(index) => self.cancel_deal_at(index, intruder),
+            None => Ok(()),
+        }
+    }
+
+    fn cancel_deal_at(&mut self, index: usize, intruder: bool) -> Result<(), TestCaseError> {
+        let d = self.deals[index].clone();
+        let p = &self.deal_parties[d.pair];
+        let res = if intruder {
+            let signer = self.intruder.insecure_clone();
+            let (asset_account, payment_account) = self.intruder_accounts[d.pair];
+            let mut a = self.env.refund_accounts(p, d.id);
+            a.proposer = signer.pubkey();
+            a.proposer_refund = match d.side {
+                DealSide::Sell => asset_account,
+                DealSide::Buy => payment_account,
+            };
+            self.env.cancel_deal_with(&signer, &a)
+        } else {
+            self.env.cancel_deal(p, d.id)
+        };
+        // Never blocked by a pause or by the listings' status.
+        let expected_ok = !intruder && d.status == DealStatus::Open;
+        prop_assert_eq!(
+            res.is_ok(),
+            expected_ok,
+            "cancel_deal {:?}: {:?}",
+            d,
+            res.as_ref().err().map(|e| &e.err)
+        );
+        if res.is_err() {
+            DEAL_REFUND_REJECTED.fetch_add(1, Relaxed);
+            return Ok(());
+        }
+        DEAL_CANCEL_OK.fetch_add(1, Relaxed);
+        self.refunded(index, DealStatus::Cancelled);
+        Ok(())
+    }
+
+    fn expire_deal(&mut self, pick: usize, thief: bool) -> Result<(), TestCaseError> {
+        match self.pick_deal(pick) {
+            Some(index) => self.expire_deal_with_thief(index, thief),
+            None => Ok(()),
+        }
+    }
+
+    fn expire_deal_at(&mut self, index: usize) -> Result<(), TestCaseError> {
+        self.expire_deal_with_thief(index, false)
+    }
+
+    fn expire_deal_with_thief(&mut self, index: usize, thief: bool) -> Result<(), TestCaseError> {
+        let d = self.deals[index].clone();
+        let now = self.env.now();
+        let p = &self.deal_parties[d.pair];
+        let res = if thief {
+            // Permissionless crank trying to redirect the refund.
+            let signer = self.intruder.insecure_clone();
+            let (asset_account, payment_account) = self.intruder_accounts[d.pair];
+            let mut a = self.env.refund_accounts(p, d.id);
+            a.proposer_refund = match d.side {
+                DealSide::Sell => asset_account,
+                DealSide::Buy => payment_account,
+            };
+            self.env.expire_deal_with(&signer, &a)
+        } else {
+            self.env.expire_deal(p, d.id)
+        };
+        // Invariant 7: never before expires_at.
+        if now < d.expires_at {
+            prop_assert!(res.is_err(), "deal expired at {now} < expires_at {}", d.expires_at);
+        }
+        let expected_ok = !thief && d.status == DealStatus::Open && now >= d.expires_at;
+        prop_assert_eq!(
+            res.is_ok(),
+            expected_ok,
+            "expire_deal {:?} at {}: {:?}",
+            d,
+            now,
+            res.as_ref().err().map(|e| &e.err)
+        );
+        if res.is_err() {
+            DEAL_REFUND_REJECTED.fetch_add(1, Relaxed);
+            return Ok(());
+        }
+        DEAL_EXPIRE_OK.fetch_add(1, Relaxed);
+        self.refunded(index, DealStatus::Expired);
+        Ok(())
+    }
+
+    /// Invariant 6: the deposit (and any excess) went back to the proposer.
+    fn refunded(&mut self, index: usize, status: DealStatus) {
+        let d = self.deals[index].clone();
+        let deposit = match d.side {
+            DealSide::Sell => d.assets,
+            DealSide::Buy => d.payment,
+        };
+        let account = self.deal_parties[d.pair].deposit_account(d.side);
+        self.credit(account, deposit + d.excess);
+        self.deals[index].status = status;
+    }
+
+    fn donate_to_deal(&mut self, pick: usize, amount: u64) {
+        if let Some(index) = self.pick_deal(pick) {
+            self.donate_to_deal_at(index, amount);
+        }
+    }
+
+    fn donate_to_deal_at(&mut self, index: usize, amount: u64) {
+        let d = &self.deals[index];
+        if d.status != DealStatus::Open {
+            return; // the vault is closed
+        }
+        let p = &self.deal_parties[d.pair];
+        let mint = match d.side {
+            DealSide::Sell => p.asset_mint,
+            DealSide::Buy => p.payment_mint,
+        };
+        let vault = p.vault(d.id);
+        self.env.donate(mint, vault, amount);
+        self.deals[index].excess += amount;
+    }
+
+    /// Invariant 6 after every step: an open deal's vault holds exactly the
+    /// deposit (plus donations); a resolved deal has no vault; every party
+    /// account holds what the model says (so nothing was stranded or paid
+    /// twice).
+    fn check_deals(&self) -> Result<(), TestCaseError> {
+        for d in &self.deals {
+            let p = &self.deal_parties[d.pair];
+            let deal = self.env.fetch_deal(&p.deal(d.id));
+            prop_assert_eq!(deal.status, d.status, "deal status");
+            let vault = p.vault(d.id);
+            if d.status == DealStatus::Open {
+                let deposit = match d.side {
+                    DealSide::Sell => d.assets,
+                    DealSide::Buy => d.payment,
+                };
+                prop_assert_eq!(self.env.balance(&vault), deposit + d.excess, "vault balance");
+            } else {
+                prop_assert!(!self.env.exists(&vault), "vault of a resolved deal still open");
+            }
+        }
+        for (account, expected) in &self.party_balances {
+            prop_assert_eq!(self.env.balance(account), *expected, "party balance");
+        }
+        Ok(())
+    }
+
     fn check_invariants(&self) -> Result<(), TestCaseError> {
         // Invariant 5.
         let config = self.config();
@@ -863,6 +1362,9 @@ impl World {
             prop_assert_eq!(self.env.mint_authority(&mint), Some(mint_authority_pda(&mint)));
         }
 
+        // Invariant 6.
+        self.check_deals()?;
+
         // Invariant 9: no Currency listing ever has a cashback ledger.
         for listing in CURRENCIES {
             for currency in [USD, BRL, E0] {
@@ -913,16 +1415,77 @@ fn invariants_hold_under_random_instruction_sequences() {
     let changes = CONFIG_CHANGES.load(Relaxed);
     let (s_ok, s_rejected) = (SWEEP_OK.load(Relaxed), SWEEP_REJECTED.load(Relaxed));
     let (issued, burned) = (ISSUE_OK.load(Relaxed), BURN_OK.load(Relaxed));
+    let (o_ok, o_rejected) = (DEAL_OPEN_OK.load(Relaxed), DEAL_OPEN_REJECTED.load(Relaxed));
+    let (a_ok, a_rejected) = (DEAL_ACCEPT_OK.load(Relaxed), DEAL_ACCEPT_REJECTED.load(Relaxed));
+    let (cancelled, expired) = (DEAL_CANCEL_OK.load(Relaxed), DEAL_EXPIRE_OK.load(Relaxed));
+    let r_rejected = DEAL_REFUND_REJECTED.load(Relaxed);
     println!(
         "settle ok {ok} / rejected {rejected}; withdraw ok {w_ok} / rejected {w_rejected}; \
          sweep ok {s_ok} / rejected {s_rejected}; batches executed {issued}; \
-         burns {burned}; config changes executed {changes}"
+         burns {burned}; config changes executed {changes}; \
+         deals opened {o_ok} / rejected {o_rejected}; accepted {a_ok} / rejected {a_rejected}; \
+         cancelled {cancelled}; expired {expired}; refunds rejected {r_rejected}"
     );
     // Not vacuous: both outcomes of every guarded path were exercised.
     assert!(ok > 0 && rejected > 0, "settle outcomes not exercised");
     assert!(w_ok > 0 && w_rejected > 0, "withdraw outcomes not exercised");
     assert!(s_ok > 0 && s_rejected > 0, "sweep outcomes not exercised");
     assert!(issued > 0 && burned > 0, "issuance paths not exercised");
+    assert!(o_ok > 0 && o_rejected > 0, "open_deal outcomes not exercised");
+    assert!(a_ok > 0 && a_rejected > 0, "accept_deal outcomes not exercised");
+    assert!(
+        cancelled > 0 && expired > 0 && r_rejected > 0,
+        "refund outcomes not exercised"
+    );
+}
+
+/// Deterministic sweep of invariants 6 and 7: on every valid P2P pair and both
+/// sides, one deal is accepted, one cancelled and one expired, with donations
+/// in between; the invalid pairs never open.
+#[test]
+fn every_deposit_ends_in_exactly_one_place() {
+    let mut world = World::new();
+    let mut id = 0u8;
+    for pair in 0..DEAL_PAIRS.len() {
+        for sell in [true, false] {
+            for _ in 0..3 {
+                world.open_deal(pair, sell, 5, 1_000_000, 1_000, id).unwrap();
+                id += 1;
+            }
+        }
+    }
+    world.check_invariants().unwrap();
+    assert_eq!(world.deals.len(), VALID_DEAL_PAIRS * 6, "only valid pairs open");
+    for i in 0..world.deals.len() {
+        world.donate_to_deal_at(i, 3);
+    }
+    // Before expiry: accept every third deal, cancel the next; expiry fails.
+    let open: Vec<usize> = (0..world.deals.len()).collect();
+    for &i in &open {
+        world.expire_deal_at(i).unwrap();
+        match i % 3 {
+            0 => world.accept_deal_at(i, false).unwrap(),
+            1 => world.cancel_deal_at(i, false).unwrap(),
+            _ => {}
+        }
+        world.check_invariants().unwrap();
+    }
+    // After expiry: accept fails, expire refunds the rest.
+    world.env.warp_secs(1_000);
+    for &i in &open {
+        world.accept_deal_at(i, false).unwrap();
+        world.expire_deal_at(i).unwrap();
+        world.check_invariants().unwrap();
+    }
+    let statuses: Vec<DealStatus> = world.deals.iter().map(|d| d.status).collect();
+    for (i, status) in statuses.iter().enumerate() {
+        let expected = match i % 3 {
+            0 => DealStatus::Executed,
+            1 => DealStatus::Cancelled,
+            _ => DealStatus::Expired,
+        };
+        assert_eq!(*status, expected, "deal {i}");
+    }
 }
 
 /// Deterministic sweep of invariants 8, 9 and 10: every invalid market (non-

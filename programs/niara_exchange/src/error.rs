@@ -80,4 +80,20 @@ pub enum ExchangeError {
     EmptyReference,
     #[msg("Currency listings are not issued through Niara")]
     CurrencyNotIssued,
+    #[msg("Asset and payment mints must be different")]
+    SameMint,
+    #[msg("expires_at must be in the future and at most 30 days ahead")]
+    InvalidExpiry,
+    #[msg("Deal is not open")]
+    DealNotOpen,
+    #[msg("Deal has expired")]
+    DealExpired,
+    #[msg("Deal has not expired yet")]
+    DealNotExpired,
+    #[msg("Account does not match the deal")]
+    DealAccountMismatch,
+    #[msg("Token account has the wrong mint or token program")]
+    InvalidTokenAccount,
+    #[msg("Cashback ledger is required for a cashback-eligible listing")]
+    MissingCashbackLedger,
 }

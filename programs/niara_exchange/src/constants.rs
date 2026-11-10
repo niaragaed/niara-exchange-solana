@@ -52,3 +52,17 @@ pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
 /// Per issuance batch: `["batch", listing, batch_no (u64 LE)]`.
 #[constant]
 pub const BATCH_SEED: &[u8] = b"batch";
+
+/// Per P2P deal: `["deal", proposer, deal_id]`. Never closed: its status is
+/// the replay guard.
+#[constant]
+pub const DEAL_SEED: &[u8] = b"deal";
+
+/// Per P2P deal: `["deal_vault", deal]` escrow token account whose authority is
+/// the deal PDA. Closed when the deal is executed, cancelled or expired.
+#[constant]
+pub const DEAL_VAULT_SEED: &[u8] = b"deal_vault";
+
+/// Longest a P2P deal may stay open: `expires_at <= now + 30 days`.
+#[constant]
+pub const MAX_DEAL_DURATION_SECS: i64 = 30 * 24 * 60 * 60;

@@ -3,7 +3,7 @@
 
 use anchor_lang::prelude::*;
 
-use crate::state::{AssetClass, BurnReason, ConfigChange};
+use crate::state::{AssetClass, BurnReason, ConfigChange, DealSide};
 
 #[event]
 pub struct PauseSet {
@@ -130,6 +130,66 @@ pub struct TokensBurned {
     pub amount: u64,
     pub reason: BurnReason,
     pub reference: [u8; 32],
+}
+
+/// The proposer escrowed its side of a P2P deal (`asset_amount` if selling,
+/// `payment_amount` if buying).
+#[event]
+pub struct DealOpened {
+    pub deal: Pubkey,
+    pub deal_id: [u8; 16],
+    pub proposer: Pubkey,
+    pub counterparty: Pubkey,
+    pub asset_mint: Pubkey,
+    pub payment_mint: Pubkey,
+    pub proposer_side: DealSide,
+    pub asset_amount: u64,
+    pub payment_amount: u64,
+    pub expires_at: i64,
+}
+
+/// A P2P deal executed. Same accounting as `Settled`:
+/// `payment_amount == seller_receives + fee`, and `cashback` is the part of
+/// `fee` credited to the asset issuer (0 for `Currency` assets).
+/// `vault_excess` is what the escrow vault held beyond the deposit (tokens sent
+/// to it outside `open_deal`); it went to the counterparty with the deposit.
+#[event]
+pub struct DealExecuted {
+    pub deal: Pubkey,
+    pub deal_id: [u8; 16],
+    pub proposer: Pubkey,
+    pub counterparty: Pubkey,
+    pub asset_mint: Pubkey,
+    pub payment_mint: Pubkey,
+    pub proposer_side: DealSide,
+    pub asset_amount: u64,
+    pub payment_amount: u64,
+    pub fee: u64,
+    pub cashback: u64,
+    pub vault_excess: u64,
+}
+
+/// The proposer cancelled an open deal and got `deposit_amount` (plus any
+/// `vault_excess`) of `deposit_mint` back.
+#[event]
+pub struct DealCancelled {
+    pub deal: Pubkey,
+    pub deal_id: [u8; 16],
+    pub proposer: Pubkey,
+    pub deposit_mint: Pubkey,
+    pub deposit_amount: u64,
+    pub vault_excess: u64,
+}
+
+/// An expired deal was refunded to the proposer (permissionless crank).
+#[event]
+pub struct DealExpired {
+    pub deal: Pubkey,
+    pub deal_id: [u8; 16],
+    pub proposer: Pubkey,
+    pub deposit_mint: Pubkey,
+    pub deposit_amount: u64,
+    pub vault_excess: u64,
 }
 
 /// Unaccounted tokens (sent to the fee vault outside `settle`) swept by the

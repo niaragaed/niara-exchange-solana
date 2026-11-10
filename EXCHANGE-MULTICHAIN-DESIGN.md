@@ -41,8 +41,9 @@ A peer-to-peer tokenized securities exchange with **self-custody** and **curated
      **off-chain** (Supabase/Postgres) and settled **on-chain, atomically**, by
      the settlement operator.
    - **P2P negotiation (escrow).** Two parties negotiate a bilateral deal
-     (propose → counter → accept). Once terms are fixed, assets are locked in a
-     per-deal escrow PDA. The counterparty's acceptance executes the swap
+     (propose → counter → accept). Once terms are fixed, the proposer locks
+     its side in a per-deal escrow PDA, naming the counterparty (v1 has no
+     open offers). The counterparty's acceptance executes the swap
      atomically. No operator is involved and the operator does not need to be trusted.
 4. **Fees and issuer cashback.** Each settlement charges a protocol fee in the
    payment token; a share of that fee is credited to the issuer (pull model).
@@ -124,8 +125,8 @@ interface SettlementAdapter {
 | `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
 | `FeeLedger` | `["fees", payment_mint]` | `payment_mint`, `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. Created by `list_currency` with the fee vault. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
 | `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
-| `Deal` | `["deal", proposer, deal_id]` | `proposer`, `counterparty` (or open), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `bump` |
-| Deal vault | ATA(Deal PDA, deposited mint) | holds the proposer's deposit until accept/cancel/expiry |
+| `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
+| Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
 | Fee vault | `["fee_vault", payment_mint]` token account, authority = vault authority | holds protocol fees + unclaimed cashback (+ unaccounted donations until swept). Created by `list_currency` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so every `Approved` currency has one and a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `list_currency` |
 
@@ -142,10 +143,10 @@ interface SettlementAdapter {
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, payment mint) before its first settlement |
 | `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates (see 3.4) |
-| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: proposer deposits its side into the deal vault |
-| `accept_deal` | counterparty | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges fee, accrues cashback, closes vault (see 3.5) |
-| `cancel_deal` | proposer (while `Open`) | refund deposit, close vault |
-| `expire_deal` | anyone, after `expires_at` | refund deposit to proposer (permissionless crank) |
+| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment; `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` |
+| `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges fee, accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
+| `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
+| `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
 | `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault |
 | `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
 | `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
@@ -229,13 +230,79 @@ Known limitations, handled explicitly:
 **P2P negotiation → per-deal escrow.** Used when two parties negotiate a
 bilateral deal (OTC / block trade / counteroffers):
 1. `open_deal`: the proposer deposits its side (asset if selling, payment if
-   buying) into a vault ATA owned by the `Deal` PDA. The deposit is cancelable
+   buying) into a vault owned by the `Deal` PDA. The deposit is cancelable
    while `Open`, so custody stays non-custodial.
 2. `accept_deal`: the counterparty signs. One instruction transfers the
    counterparty's side directly, releases the escrowed side, charges the fee,
    accrues cashback, closes the vault (rent back to the proposer) and emits
    `DealExecuted`.
 3. `cancel_deal` / `expire_deal`: refund after cancellation or after `expires_at`.
+
+**P2P escrow rules (v1, implemented).**
+- **Markets.** The asset listing must be `Approved` and `FixedIncome`,
+  `Credit` or `Currency` (`WrongTradingMode` for `Equity`); the payment mint
+  must have an `Approved` `Currency` listing (`InvalidPaymentMint`), and the
+  two mints must differ (`SameMint`). `open_deal` and `accept_deal` re-run the
+  mint extension allowlist on both mints, and the freeze-authority check on
+  issuer-listed assets (a `Currency` sold as the asset may have one, like any
+  listed currency, §3.8).
+- **Currency deals** (e.g. BRL ↔ USDT): `asset_mint` is the currency being
+  sold, `payment_mint` the other one. The fee is charged in `payment_mint`
+  and the cashback is zero (`Currency` is never cashback-eligible, so no
+  `CashbackLedger` exists for it; `accept_deal` takes the ledger as an
+  optional account and requires it only for eligible listings,
+  `MissingCashbackLedger`).
+- **Bilateral, named counterparty.** v1 has no open offers: `open_deal` names
+  the counterparty, which must not be the proposer (`SelfTrade`) or the
+  default key (`InvalidAddress`); only that wallet can `accept_deal`
+  (`Unauthorized`). `deal_id` is the 16-byte off-chain negotiation id, scoped
+  to the proposer (`["deal", proposer, deal_id]`).
+- **Expiry.** `now < expires_at ≤ now + 30 days` at `open_deal`
+  (`InvalidExpiry`, `MAX_DEAL_DURATION_SECS`). The deal is live while
+  `now < expires_at` (`accept_deal` fails with `DealExpired` from
+  `expires_at` on) and expirable once `now ≥ expires_at` (`expire_deal` fails
+  with `DealNotExpired` before): no gap and no overlap (invariant 7).
+- **Custody.** `open_deal` creates the vault `["deal_vault", deal]`, a token
+  account of the deposited mint whose authority is the `Deal` PDA, and moves
+  the deposit into it (the proposer signs). On `accept_deal` the counterparty
+  signs and delivers its side **directly** from its own accounts (no
+  delegate); the vault is released by the `Deal` PDA.
+- **Execution** (`accept_deal`, one instruction, atomic), with the same math
+  as `settle` (§3.4) and the fee in force at acceptance:
+  `fee = ceil(payment_amount × fee_bps / 10_000)`, `seller_receives > 0`
+  required (`ZeroSellerProceeds`, also checked at `open_deal` with the fee in
+  force then), cashback by `listing.cashback_eligible`.
+  - proposer sells: vault → counterparty (asset); counterparty → proposer
+    (`seller_receives`); counterparty → fee vault (`fee`).
+  - proposer buys: counterparty → proposer (asset); vault → counterparty
+    (`seller_receives`); vault → fee vault (`fee`).
+  Then `FeeLedger`/`CashbackLedger` are updated as in `settle`, the vault is
+  closed (rent to the proposer) and the deal becomes `Executed`.
+- **Refunds.** `cancel_deal`: proposer only (`Unauthorized`), while `Open`
+  (also after `expires_at`, as long as nobody expired it first).
+  `expire_deal`: anyone, once expired; the refund can only go to a token
+  account owned by the proposer. Both return the deposit, close the vault
+  (rent to the proposer) and set `Cancelled` / `Expired`. Neither reads
+  `Config` or the listings, so a pause or a suspended/delisted listing never
+  blocks them (§3.3), while it does block `open_deal` and `accept_deal`.
+- **Tokens sent to a vault.** Anyone can transfer into a deal vault, and a
+  token account can only be closed empty, so such tokens would otherwise
+  block every exit and strand the deposit. Every exit therefore releases the
+  vault's whole balance: the excess goes with the deposit (counterparty on
+  accept, proposer on cancel/expiry) and is reported as `vault_excess` in the
+  event.
+- **Replay.** The `Deal` account is never closed: once it leaves `Open` it
+  can be neither accepted nor refunded again (the vault is closed at that
+  point, so the account checks already fail), and the same `deal_id` cannot be
+  reopened by the same proposer. No `SettlementRecord` is involved. The
+  proposer pays the deal's rent (~0.0023 SOL: 196 bytes + account overhead)
+  for good and gets the vault's rent back.
+- **Fee changes.** The fee is read at acceptance, as in `settle`. A fee
+  change is timelocked and capped at `MAX_FEE_BPS`, and the proposer can
+  cancel at any time while the deal is open.
+- **Events.** `DealOpened`, `DealExecuted` (with `fee`, `cashback` and
+  `vault_excess`; same accounting as `Settled`), `DealCancelled`,
+  `DealExpired`.
 
 Why this split is sound: in P2P mode **both parties sign their own transaction**,
 so no operator and no trust assumption are needed. That mode is fully trustless
@@ -312,18 +379,21 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   for the mint (in `list_currency`, before the fee vault), so every rejected
   mint fails with `UnsupportedMintExtension` on both paths. Token-2022 cannot add the rejected
   extensions to a mint after initialization, so the check holds for the life of
-  the listing; `settle` and `open_deal` will still re-run it on both the asset
-  and the payment mint as defense in depth.
+  the listing; `settle`, `open_deal` and `accept_deal` still re-run it on both
+  the asset and the payment mint as defense in depth.
 - **Freeze authority.** The extension allowlist does not cover the base mint's
   `freeze_authority`. Asset mints (`submit_listing`) must have
   `freeze_authority == None`, otherwise the issuer could freeze escrow vaults,
   fee vaults or holders' accounts mid-settlement (`FreezeAuthorityNotAllowed`).
   Neither token program can add a freeze authority once it is `None`, so the
-  check holds for the life of the listing; `settle` re-checks it. Currency mints
+  check holds for the life of the listing; `settle`, `open_deal` and
+  `accept_deal` re-check it. Currency mints
   (`list_currency`) **may** have one, because real stablecoins do (USDC, USDT):
-  this is an accepted, curated risk. A currency issuer can freeze a fee vault
-  or a user's payment account, which makes settlements and withdrawals in that
-  currency revert (nothing moves) until it unfreezes.
+  this is an accepted, curated risk, also when a currency is the asset leg of
+  a P2P deal. A currency issuer can freeze a fee vault, a deal vault or a
+  user's account, which makes settlements, deals, refunds and withdrawals in
+  that currency revert (nothing moves) until it unfreezes; a deposit in a
+  frozen deal vault stays there until then.
 
 ### 3.9 Testing
 
@@ -356,6 +426,10 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   sets the number of sequences (default 48). A mutation check (cashback
   under-recorded in the `FeeLedger`) made it fail and shrink to a minimal
   sequence. Invariants 6 and 7 come with the escrow (week 3).
+- Escrow (week 3): `tests/test_deal.rs` covers every class × side × token
+  program combination, the expiry boundary, replays, pause and listing status
+  (blocking open/accept, never cancel/expire), every authorization and
+  account check, and tokens sent straight into a deal vault.
 - Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):
@@ -542,12 +616,12 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
 - **Niara-Register:** extend the indexer to capture `ListingApproved`,
-  `Settled`, `IssuanceExecuted` and `TokensBurned` (Solana; the EVM side
+  `Settled`, `DealExecuted`, `IssuanceExecuted` and `TokensBurned` (Solana; the EVM side
   follows when it gains issuance) on all three chains into the "Global registry" area (today empty
   because the Exchange has not operated for real). There is **no separate
-  `CashbackCredited` event**: `Settled` carries `fee` and `cashback`, so the
-  indexer credits the issuer's cashback from `Settled` (one event per
-  settlement, nothing to correlate). Listing `doc_hash` can be
+  `CashbackCredited` event**: `Settled` and `DealExecuted` carry `fee` and
+  `cashback`, so the indexer credits the issuer's cashback from them (one
+  event per settlement or deal, nothing to correlate). Listing `doc_hash` can be
   signed and registered through Register's document signature feature.
 
 Narrative: *the Exchange operates, the Register proves it.*

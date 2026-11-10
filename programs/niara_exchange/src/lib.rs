@@ -10,6 +10,7 @@ pub mod instructions;
 pub mod math;
 pub mod mint_policy;
 pub mod state;
+pub mod token_vault;
 
 use anchor_lang::prelude::*;
 
@@ -125,6 +126,33 @@ pub mod niara_exchange {
         payment_amount: u64,
     ) -> Result<()> {
         instructions::settle::handle_settle(ctx, order_id, asset_amount, payment_amount)
+    }
+
+    // ---- P2P escrow (spec §3.5) -------------------------------------------
+
+    /// Proposer escrows its side of a bilateral deal with a named counterparty.
+    pub fn open_deal(
+        ctx: Context<OpenDeal>,
+        deal_id: [u8; 16],
+        terms: DealTerms,
+        expires_at: i64,
+    ) -> Result<()> {
+        instructions::deal::handle_open_deal(ctx, deal_id, terms, expires_at)
+    }
+
+    /// Counterparty delivers its side; both legs, fee and cashback in one go.
+    pub fn accept_deal(ctx: Context<AcceptDeal>) -> Result<()> {
+        instructions::deal::handle_accept_deal(ctx)
+    }
+
+    /// Proposer takes its deposit back while the deal is open. Never paused.
+    pub fn cancel_deal(ctx: Context<CancelDeal>) -> Result<()> {
+        instructions::deal::handle_cancel_deal(ctx)
+    }
+
+    /// Anyone refunds the proposer once the deal has expired. Never paused.
+    pub fn expire_deal(ctx: Context<ExpireDeal>) -> Result<()> {
+        instructions::deal::handle_expire_deal(ctx)
     }
 
     // ---- Withdrawals (pull model; blocked while paused) ------------------

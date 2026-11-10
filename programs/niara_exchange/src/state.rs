@@ -322,6 +322,88 @@ pub struct SettlementRecord {
     pub bump: u8,
 }
 
+/// The proposer's side of a P2P deal. It decides what the proposer escrows:
+/// the asset when selling, the payment when buying.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+pub enum DealSide {
+    Sell,
+    Buy,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+pub enum DealStatus {
+    Open,
+    Executed,
+    Cancelled,
+    Expired,
+}
+
+/// Terms of a P2P deal as agreed off-chain. The mints come from the accounts
+/// of `open_deal`.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DealTerms {
+    /// The only wallet that can accept (v1 has no open offers).
+    pub counterparty: Pubkey,
+    pub proposer_side: DealSide,
+    /// Raw units of the asset mint.
+    pub asset_amount: u64,
+    /// Raw units of the payment mint; the fee is taken out of it.
+    pub payment_amount: u64,
+}
+
+/// A bilateral P2P deal (spec §3.5). PDA: `["deal", proposer, deal_id]`.
+/// Never closed: once it leaves `Open` it can be neither accepted nor
+/// refunded again (the status is the replay guard).
+#[account]
+#[derive(InitSpace, Debug)]
+pub struct Deal {
+    /// Off-chain negotiation id (UUID).
+    pub deal_id: [u8; 16],
+    pub proposer: Pubkey,
+    pub counterparty: Pubkey,
+    pub asset_mint: Pubkey,
+    pub payment_mint: Pubkey,
+    pub asset_amount: u64,
+    pub payment_amount: u64,
+    pub proposer_side: DealSide,
+    /// The deal can be accepted while `now < expires_at`, and expired once
+    /// `now >= expires_at`.
+    pub expires_at: i64,
+    pub status: DealStatus,
+    pub opened_at: i64,
+    /// When executed, cancelled or expired; 0 while `Open`.
+    pub resolved_at: i64,
+    pub bump: u8,
+    /// Bump of the escrow vault `["deal_vault", deal]`.
+    pub vault_bump: u8,
+}
+
+impl Deal {
+    /// The mint the proposer escrowed.
+    pub fn deposit_mint(&self) -> Pubkey {
+        match self.proposer_side {
+            DealSide::Sell => self.asset_mint,
+            DealSide::Buy => self.payment_mint,
+        }
+    }
+
+    /// How much of `deposit_mint` the proposer escrowed.
+    pub fn deposit_amount(&self) -> u64 {
+        match self.proposer_side {
+            DealSide::Sell => self.asset_amount,
+            DealSide::Buy => self.payment_amount,
+        }
+    }
+
+    /// The mint the proposer receives on execution (the counterparty's side).
+    pub fn proceeds_mint(&self) -> Pubkey {
+        match self.proposer_side {
+            DealSide::Sell => self.payment_mint,
+            DealSide::Buy => self.asset_mint,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +473,33 @@ mod tests {
         assert!(ConfigChange::CashbackBps(BPS_DENOMINATOR + 1).validate().is_err());
         assert!(ConfigChange::Admin(Pubkey::default()).validate().is_err());
         assert!(ConfigChange::Treasury(Pubkey::new_unique()).validate().is_ok());
+    }
+
+    #[test]
+    fn deal_sides() {
+        let asset = Pubkey::new_unique();
+        let payment = Pubkey::new_unique();
+        let mut deal = Deal {
+            deal_id: [1; 16],
+            proposer: Pubkey::new_unique(),
+            counterparty: Pubkey::new_unique(),
+            asset_mint: asset,
+            payment_mint: payment,
+            asset_amount: 3,
+            payment_amount: 500,
+            proposer_side: DealSide::Sell,
+            expires_at: 0,
+            status: DealStatus::Open,
+            opened_at: 0,
+            resolved_at: 0,
+            bump: 0,
+            vault_bump: 0,
+        };
+        assert_eq!((deal.deposit_mint(), deal.deposit_amount()), (asset, 3));
+        assert_eq!(deal.proceeds_mint(), payment);
+        deal.proposer_side = DealSide::Buy;
+        assert_eq!((deal.deposit_mint(), deal.deposit_amount()), (payment, 500));
+        assert_eq!(deal.proceeds_mint(), asset);
     }
 
     #[test]

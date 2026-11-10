@@ -1,8 +1,11 @@
 //! Shared LiteSVM harness. Requires `anchor build` first (loads the `.so`).
 #![allow(dead_code)]
 
+mod deal;
 mod issuance;
 mod trading;
+#[allow(unused_imports)] // only the escrow suites use the deal fixtures
+pub use deal::*;
 pub use issuance::*;
 pub use trading::*;
 

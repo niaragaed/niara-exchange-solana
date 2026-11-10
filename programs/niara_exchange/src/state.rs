@@ -192,6 +192,10 @@ pub struct Listing {
     /// `supply == issued - burned` (on-chain `<=`: holders can also burn
     /// directly through the token program).
     pub burned: u64,
+    /// Set by the listing authority (no timelock) to stop `withdraw_cashback`
+    /// for this listing, e.g. after an issuer key compromise (spec §9.5).
+    /// Cashback keeps accruing while frozen.
+    pub cashback_frozen: bool,
     pub bump: u8,
 }
 

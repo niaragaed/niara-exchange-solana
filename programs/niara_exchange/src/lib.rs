@@ -81,6 +81,16 @@ pub mod niara_exchange {
         instructions::listing::handle_delist(ctx)
     }
 
+    /// Stops `withdraw_cashback` for one listing (accrual continues). No
+    /// timelock; allowed while paused and in any listing status.
+    pub fn freeze_cashback(ctx: Context<UpdateListingStatus>) -> Result<()> {
+        instructions::listing::handle_freeze_cashback(ctx)
+    }
+
+    pub fn unfreeze_cashback(ctx: Context<UpdateListingStatus>) -> Result<()> {
+        instructions::listing::handle_unfreeze_cashback(ctx)
+    }
+
     // ---- Niara-approved issuance (spec §3.12) ----------------------------
 
     /// Issuer proposes a numbered batch; mints nothing.

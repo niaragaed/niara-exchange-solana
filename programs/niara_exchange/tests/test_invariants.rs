@@ -118,6 +118,8 @@ static DEAL_ACCEPT_REJECTED: AtomicU64 = AtomicU64::new(0);
 static DEAL_CANCEL_OK: AtomicU64 = AtomicU64::new(0);
 static DEAL_EXPIRE_OK: AtomicU64 = AtomicU64::new(0);
 static DEAL_REFUND_REJECTED: AtomicU64 = AtomicU64::new(0);
+static FREEZE_CHANGES: AtomicU64 = AtomicU64::new(0);
+static FROZEN_WITHDRAW_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum StatusOp {
@@ -140,7 +142,14 @@ enum Action {
     Pause,
     Unpause,
     /// `permille` of what is available; above 1000 overdraws.
-    WithdrawCashback { asset: usize, currency: usize, permille: u16, intruder: bool },
+    /// `prefer_frozen`: target a frozen listing with cashback, if there is one.
+    WithdrawCashback {
+        asset: usize,
+        currency: usize,
+        permille: u16,
+        intruder: bool,
+        prefer_frozen: bool,
+    },
     WithdrawFees { currency: usize, permille: u16, intruder: bool },
     ProposeFee(u16),
     ProposeCashback(u16),
@@ -168,6 +177,8 @@ enum Action {
     ExpireDeal { deal: usize, thief: bool },
     /// Unaccounted transfer straight into an open deal's vault.
     DonateToDeal { deal: usize, amount: u64 },
+    /// `freeze_cashback` / `unfreeze_cashback` on any listing.
+    CashbackFreeze { listing: usize, freeze: bool, intruder: bool },
 }
 
 /// The model of one deal opened during the run.
@@ -217,13 +228,17 @@ fn action() -> impl Strategy<Value = Action> {
         prop::sample::select(CURRENCIES.to_vec()),
         permille.clone(),
         prop::bool::weighted(0.1),
+        prop::bool::weighted(0.5),
     )
-        .prop_map(|(asset, currency, permille, intruder)| Action::WithdrawCashback {
-            asset,
-            currency,
-            permille,
-            intruder,
-        });
+        .prop_map(
+            |(asset, currency, permille, intruder, prefer_frozen)| Action::WithdrawCashback {
+                asset,
+                currency,
+                permille,
+                intruder,
+                prefer_frozen,
+            },
+        );
     let withdraw_fees = (
         prop::sample::select(CURRENCIES.to_vec()),
         permille,
@@ -280,9 +295,9 @@ fn action() -> impl Strategy<Value = Action> {
             .prop_map(|(pair, seller_side, amount)| Action::Delegate { pair, seller_side, amount }),
         1 => (0..LISTINGS, prop::sample::select(vec![USD, BRL, E0]))
             .prop_map(|(listing, currency)| Action::InitLedger { listing, currency }),
-        1 => (prop::sample::select(CURRENCIES.to_vec()), 1u64..1_000_000)
+        2 => (prop::sample::select(CURRENCIES.to_vec()), 1u64..1_000_000)
             .prop_map(|(currency, amount)| Action::Donate { currency, amount }),
-        1 => (prop::sample::select(CURRENCIES.to_vec()), prop::bool::weighted(0.1))
+        2 => (prop::sample::select(CURRENCIES.to_vec()), prop::bool::weighted(0.1))
             .prop_map(|(currency, intruder)| Action::Sweep { currency, intruder }),
         3 => (
             prop::sample::select(ISSUER_LISTINGS.to_vec()),
@@ -323,6 +338,18 @@ fn action() -> impl Strategy<Value = Action> {
             .prop_map(|(deal, thief)| Action::ExpireDeal { deal, thief }),
         1 => (any::<usize>(), 1u64..1_000)
             .prop_map(|(deal, amount)| Action::DonateToDeal { deal, amount }),
+        // Mostly freezes, mostly on the listings that accrue the most
+        // cashback; USD checks that a Currency listing cannot be frozen.
+        3 => (
+            prop::sample::select(vec![E0, E1, E0, E1, FI, CR, USD]),
+            prop::bool::weighted(0.7),
+            prop::bool::weighted(0.1),
+        )
+            .prop_map(|(listing, freeze, intruder)| Action::CashbackFreeze {
+                listing,
+                freeze,
+                intruder,
+            }),
     ]
 }
 
@@ -529,7 +556,15 @@ impl World {
                 currency,
                 permille,
                 intruder,
-            } => self.withdraw_cashback(asset, currency, permille, intruder)?,
+                prefer_frozen,
+            } => {
+                let (asset, currency) = if prefer_frozen {
+                    self.frozen_with_cashback().unwrap_or((asset, currency))
+                } else {
+                    (asset, currency)
+                };
+                self.withdraw_cashback(asset, currency, permille, intruder)?
+            }
             Action::WithdrawFees {
                 currency,
                 permille,
@@ -602,6 +637,59 @@ impl World {
             Action::CancelDeal { deal, intruder } => self.cancel_deal(deal, intruder)?,
             Action::ExpireDeal { deal, thief } => self.expire_deal(deal, thief)?,
             Action::DonateToDeal { deal, amount } => self.donate_to_deal(deal, amount),
+            Action::CashbackFreeze {
+                listing,
+                freeze,
+                intruder,
+            } => self.cashback_freeze(listing, freeze, intruder)?,
+        }
+        Ok(())
+    }
+
+    /// A (listing, currency) whose listing is frozen and has cashback available.
+    fn frozen_with_cashback(&self) -> Option<(usize, usize)> {
+        let mut ledgers: Vec<(usize, usize)> = self.ledgers.iter().copied().collect();
+        ledgers.sort();
+        ledgers.into_iter().find(|&(listing, currency)| {
+            self.listing(listing).cashback_frozen
+                && self
+                    .env
+                    .fetch::<CashbackLedger>(&cashback_pda(&self.mints[listing], &self.mints[currency]))
+                    .available()
+                    .unwrap()
+                    > 0
+        })
+    }
+
+    /// Listing authority only, no timelock, any listing status, never paused;
+    /// a `Currency` listing has nothing to freeze.
+    fn cashback_freeze(
+        &mut self,
+        listing: usize,
+        freeze: bool,
+        intruder: bool,
+    ) -> Result<(), TestCaseError> {
+        let mint = self.mints[listing];
+        let before = self.env.listing(&mint);
+        let signer = if intruder {
+            self.intruder.insecure_clone()
+        } else {
+            self.env.listing_authority.insecure_clone()
+        };
+        let res = if freeze {
+            self.env.freeze_cashback(&signer, mint)
+        } else {
+            self.env.unfreeze_cashback(&signer, mint)
+        };
+        let expected_ok =
+            !intruder && before.cashback_eligible && before.cashback_frozen != freeze;
+        prop_assert_eq!(res.is_ok(), expected_ok, "cashback freeze {} -> {}", listing, freeze);
+        let now_frozen = self.env.listing(&mint).cashback_frozen;
+        if expected_ok {
+            FREEZE_CHANGES.fetch_add(1, Relaxed);
+            prop_assert_eq!(now_frozen, freeze);
+        } else {
+            prop_assert_eq!(now_frozen, before.cashback_frozen);
         }
         Ok(())
     }
@@ -872,6 +960,7 @@ impl World {
         };
         let amount = scaled(available, permille);
         let paused = self.config().paused;
+        let frozen = self.listing(asset).cashback_frozen;
         let signer = if intruder {
             self.intruder.insecure_clone()
         } else {
@@ -888,11 +977,15 @@ impl World {
         );
         if res.is_err() {
             WITHDRAW_REJECTED.fetch_add(1, Relaxed);
+            if frozen && !paused && !intruder && amount > 0 && amount <= available {
+                FROZEN_WITHDRAW_REJECTED.fetch_add(1, Relaxed);
+            }
             prop_assert_eq!(self.env.balance(&dest), before);
             return Ok(());
         }
         WITHDRAW_OK.fetch_add(1, Relaxed);
         prop_assert!(!paused, "cashback withdrawn while paused");
+        prop_assert!(!frozen, "cashback withdrawn from a frozen listing");
         prop_assert!(!intruder, "cashback withdrawn by a non-issuer");
         prop_assert!(!CURRENCIES.contains(&asset), "cashback from a Currency listing");
         prop_assert!(amount > 0 && amount <= available);
@@ -1397,7 +1490,7 @@ fn invariants_hold_under_random_instruction_sequences() {
         failure_persistence: None,
         ..ProptestConfig::default()
     });
-    let result = runner.run(&prop::collection::vec(action(), 1..60), |actions| {
+    let result = runner.run(&prop::collection::vec(action(), 1..80), |actions| {
         let mut world = World::new();
         world.check_invariants()?;
         for action in actions {
@@ -1419,12 +1512,15 @@ fn invariants_hold_under_random_instruction_sequences() {
     let (a_ok, a_rejected) = (DEAL_ACCEPT_OK.load(Relaxed), DEAL_ACCEPT_REJECTED.load(Relaxed));
     let (cancelled, expired) = (DEAL_CANCEL_OK.load(Relaxed), DEAL_EXPIRE_OK.load(Relaxed));
     let r_rejected = DEAL_REFUND_REJECTED.load(Relaxed);
+    let (freezes, frozen_rejected) =
+        (FREEZE_CHANGES.load(Relaxed), FROZEN_WITHDRAW_REJECTED.load(Relaxed));
     println!(
         "settle ok {ok} / rejected {rejected}; withdraw ok {w_ok} / rejected {w_rejected}; \
          sweep ok {s_ok} / rejected {s_rejected}; batches executed {issued}; \
          burns {burned}; config changes executed {changes}; \
          deals opened {o_ok} / rejected {o_rejected}; accepted {a_ok} / rejected {a_rejected}; \
-         cancelled {cancelled}; expired {expired}; refunds rejected {r_rejected}"
+         cancelled {cancelled}; expired {expired}; refunds rejected {r_rejected}; \
+         cashback freeze changes {freezes}; withdrawals stopped by a freeze {frozen_rejected}"
     );
     // Not vacuous: both outcomes of every guarded path were exercised.
     assert!(ok > 0 && rejected > 0, "settle outcomes not exercised");
@@ -1437,6 +1533,7 @@ fn invariants_hold_under_random_instruction_sequences() {
         cancelled > 0 && expired > 0 && r_rejected > 0,
         "refund outcomes not exercised"
     );
+    assert!(freezes > 0 && frozen_rejected > 0, "cashback freeze not exercised");
 }
 
 /// Deterministic sweep of invariants 6 and 7: on every valid P2P pair and both

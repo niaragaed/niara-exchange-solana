@@ -69,6 +69,11 @@ pub struct WithdrawCashback<'info> {
 
 pub fn handle_withdraw_cashback(ctx: Context<WithdrawCashback>, amount: u64) -> Result<()> {
     ctx.accounts.config.require_not_paused()?;
+    // Per-listing containment (spec §9.5); accrual is not affected.
+    require!(
+        !ctx.accounts.listing.cashback_frozen,
+        ExchangeError::CashbackFrozen
+    );
     require!(amount > 0, ExchangeError::ZeroAmount);
 
     let ledger = &mut ctx.accounts.cashback_ledger;

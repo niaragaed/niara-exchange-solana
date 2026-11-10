@@ -96,4 +96,10 @@ pub enum ExchangeError {
     InvalidTokenAccount,
     #[msg("Cashback ledger is required for a cashback-eligible listing")]
     MissingCashbackLedger,
+    #[msg("Cashback withdrawals are frozen for this listing")]
+    CashbackFrozen,
+    #[msg("Cashback is already frozen for this listing")]
+    CashbackAlreadyFrozen,
+    #[msg("Cashback is not frozen for this listing")]
+    CashbackNotFrozen,
 }

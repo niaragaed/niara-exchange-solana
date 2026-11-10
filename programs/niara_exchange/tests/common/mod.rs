@@ -463,6 +463,16 @@ impl Env {
         let ix = ix(self.status_accounts(authority, &mint), instruction::Delist {});
         self.send(&[ix], &[authority])
     }
+
+    pub fn freeze_cashback(&mut self, authority: &Keypair, mint: Pubkey) -> TransactionResult {
+        let ix = ix(self.status_accounts(authority, &mint), instruction::FreezeCashback {});
+        self.send(&[ix], &[authority])
+    }
+
+    pub fn unfreeze_cashback(&mut self, authority: &Keypair, mint: Pubkey) -> TransactionResult {
+        let ix = ix(self.status_accounts(authority, &mint), instruction::UnfreezeCashback {});
+        self.send(&[ix], &[authority])
+    }
 }
 
 /// Asserts the transaction failed with the given custom program error code.

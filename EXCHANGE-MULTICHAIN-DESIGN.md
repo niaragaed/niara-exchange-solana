@@ -119,7 +119,7 @@ interface SettlementAdapter {
 |---|---|---|
 | `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
-| `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `bump` |
+| `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `cashback_frozen: bool` (§9.5; false at creation), `bump` |
 | `IssuanceBatch` | `["batch", listing, batch_no]` (`batch_no` as `u64` LE) | `listing`, `batch_no`, `amount`, `recipient` (wallet), `doc_hash`, `status` (`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`. Never closed: the on-chain issuance record (§3.12) |
 | Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
 | `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
@@ -141,13 +141,14 @@ interface SettlementAdapter {
 | `burn_with_reason(amount, reason, reference)` | holder | burn own tokens of an issuer-listed asset with reason `Redemption`/`Cancellation`, emit `TokensBurned` (§3.12) |
 | `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false` |
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
+| `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, payment mint) before its first settlement |
 | `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates (see 3.4) |
 | `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment; `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` |
 | `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges fee, accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
 | `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
-| `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault |
+| `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault; reverts while `listing.cashback_frozen` (`CashbackFrozen`) |
 | `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
 | `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
 | `propose_change` / `execute_change` | admin | timelocked fee/cashback/operator/authority changes |
@@ -163,12 +164,16 @@ deposit. While `paused`:
 - **always allowed:** `cancel_deal` and `expire_deal` (a user reclaims their own
   deposit, which the protocol's accounting does not decide), `burn_with_reason`
   (a holder destroys its own tokens), listing actions (`submit_listing`,
-  `list_currency`, `approve_listing`, `suspend_listing`, `delist`),
+  `list_currency`, `approve_listing`, `suspend_listing`, `delist`,
+  `freeze_cashback`, `unfreeze_cashback`),
   `request_issuance` and `reject_issuance` (neither mints),
   `init_cashback_ledger`, and admin/timelock actions.
 
 Listing status gates trading, not payouts: accrued cashback and protocol fees
 stay withdrawable after the asset is delisted or the currency is suspended.
+The per-listing cashback freeze (§9.5) is the one listing-level switch on
+payouts: it stops `withdraw_cashback` for that listing only, and never
+trading or accrual.
 
 ### 3.4 `settle` — the core
 
@@ -735,8 +740,8 @@ reissue on its own** when the issuer's key is lost or stolen.
 **Recovery path (works with v1 mints).**
 1. The guardian suspends the listing (§9.1): no trading, no new requests, no
    batch executes. Cashback withdrawals are *not* stopped by suspension
-   (listing status gates trading, not payouts), which is why §9.5 adds a
-   per-listing cashback freeze.
+   (listing status gates trading, not payouts), which is why the listing's
+   cashback is frozen too (§9.5, in v1).
 2. Niara rotates `listing.issuer` to a new issuer wallet, timelocked, after
    verifying the issuer's identity and corporate authorization off-chain.
 3. The new issuer wallet requests the reissuance batch (`doc_hash` = the
@@ -802,11 +807,21 @@ listing does not stop it.
   address; `withdraw_cashback` pays only there. Changing it is timelocked
   (propose / execute, cancellable by Niara), so an attacker who takes the key
   cannot redirect payouts before the real issuer or Niara reacts.
-- **Per-listing freeze.** The guardian can freeze cashback withdrawals for one
-  listing (a flag on the listing, checked by `withdraw_cashback`), without
-  pausing the whole protocol. Unfreezing follows "resume slow" (§9.1): the
-  listing authority behind the multisig, not the guardian. Accrual continues
-  while frozen; nothing is lost.
+- **Per-listing freeze — done in v1.** `Listing.cashback_frozen`, set by
+  `freeze_cashback` and cleared by `unfreeze_cashback` (§3.3), stops
+  `withdraw_cashback` for one listing (`CashbackFrozen`) without pausing the
+  whole protocol. Both are signed by the listing authority with **no
+  timelock** (containment must act at once), work in any listing status
+  (cashback stays withdrawable after delisting, so it must stay freezable)
+  and while paused. Accrual continues while frozen (`settle` and
+  `accept_deal` do not read the flag); nothing is lost, and everything
+  accrued is withdrawable after unfreezing. `Currency` listings, which never
+  accrue cashback, cannot be frozen. Tests: `tests/test_cashback_freeze.rs`,
+  plus freeze/unfreeze (incl. wrong signers) in the invariant fuzzer, which
+  checks that no withdrawal ever succeeds on a frozen listing.
+  Still roadmap: when the guardian role (§9.1) lands, it gets
+  `freeze_cashback` only; unfreezing follows "resume slow" and stays with the
+  listing authority behind the multisig.
 - **Issuer key hygiene, checked at onboarding.** Issuers must sign from a
   multisig (Squads on Solana, Safe on EVM) or a hardware wallet. A multisig is
   verifiable on-chain (the issuer address is a Squads vault / Safe contract);

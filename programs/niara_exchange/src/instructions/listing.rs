@@ -7,7 +7,9 @@ use anchor_spl::{
 use crate::{
     constants::*,
     error::ExchangeError,
-    events::{ListingApproved, ListingDelisted, ListingSubmitted, ListingSuspended},
+    events::{
+        CashbackFreezeSet, ListingApproved, ListingDelisted, ListingSubmitted, ListingSuspended,
+    },
     mint_policy::{require_allowed_mint_extensions, require_no_freeze_authority},
     state::*,
     token_vault::{create_pda_token_account, PdaTokenAccount},
@@ -89,6 +91,7 @@ pub fn handle_submit_listing(
         next_batch_no: 1,
         issued: 0,
         burned: 0,
+        cashback_frozen: false,
         bump: ctx.bumps.listing,
     });
     emit_cpi!(ListingSubmitted {
@@ -169,6 +172,7 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         next_batch_no: 0,
         issued: 0,
         burned: 0,
+        cashback_frozen: false,
         bump: ctx.bumps.listing,
     };
     ctx.accounts.listing.set_inner(listing.clone());
@@ -278,4 +282,44 @@ pub fn handle_delist(ctx: Context<UpdateListingStatus>) -> Result<()> {
     };
     emit_cpi!(event);
     Ok(())
+}
+
+// ---- cashback freeze (spec §9.5) ---------------------------------------------
+
+/// Stops `withdraw_cashback` for one listing; accrual continues. Listing
+/// authority, no timelock (containment must act immediately), any listing
+/// status, allowed while paused.
+pub fn handle_freeze_cashback(ctx: Context<UpdateListingStatus>) -> Result<()> {
+    set_cashback_frozen(&mut ctx.accounts.listing, true)?;
+    let event = cashback_freeze_event(&ctx.accounts.listing, &ctx.accounts.listing_authority);
+    emit_cpi!(event);
+    Ok(())
+}
+
+pub fn handle_unfreeze_cashback(ctx: Context<UpdateListingStatus>) -> Result<()> {
+    set_cashback_frozen(&mut ctx.accounts.listing, false)?;
+    let event = cashback_freeze_event(&ctx.accounts.listing, &ctx.accounts.listing_authority);
+    emit_cpi!(event);
+    Ok(())
+}
+
+fn set_cashback_frozen(listing: &mut Listing, frozen: bool) -> Result<()> {
+    // `Currency` listings never accrue cashback: nothing to freeze.
+    require!(listing.cashback_eligible, ExchangeError::NotCashbackEligible);
+    if frozen {
+        require!(!listing.cashback_frozen, ExchangeError::CashbackAlreadyFrozen);
+    } else {
+        require!(listing.cashback_frozen, ExchangeError::CashbackNotFrozen);
+    }
+    listing.cashback_frozen = frozen;
+    Ok(())
+}
+
+fn cashback_freeze_event(listing: &Account<Listing>, authority: &Signer) -> CashbackFreezeSet {
+    CashbackFreezeSet {
+        listing: listing.key(),
+        asset_mint: listing.asset_mint,
+        frozen: listing.cashback_frozen,
+        listing_authority: authority.key(),
+    }
 }

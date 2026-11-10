@@ -75,6 +75,16 @@ pub struct Settled {
     pub cashback: u64,
 }
 
+/// Cashback withdrawals for one listing were frozen (`frozen == true`) or
+/// unfrozen by the listing authority. Accrual is never affected.
+#[event]
+pub struct CashbackFreezeSet {
+    pub listing: Pubkey,
+    pub asset_mint: Pubkey,
+    pub frozen: bool,
+    pub listing_authority: Pubkey,
+}
+
 #[event]
 pub struct CashbackWithdrawn {
     pub listing: Pubkey,

@@ -388,6 +388,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 
 ### 3.10 Out of v1 scope (state it, don't fake it)
 
+Security and token-lifecycle work (guardian role, issuer key rotation,
+clawback and recovery, multisig upgrade authority, audit) is in §9.
+
 - Fixed income / credit **lifecycle**: coupon payments, amortization, maturity
   redemption, default handling. In v1 these tokens trade but do not pay out;
   the lifecycle (snapshot of holders + on-chain distribution) is roadmap.
@@ -577,3 +580,91 @@ labeling.
   settlement maps to Solana's account model; why SPL delegate vs. escrow; how
   curated listing addresses the regulatory tension; what is NOT done yet
   (audit, regulation, signed intents if missing, Token-2022 compliance layer).
+
+---
+
+## 9. Roadmap — security and token lifecycle
+
+Not in v1 unless marked done. Ordered by what an incident would need first:
+contain it, recover from it, prove what happened.
+
+### 9.1 Containment: "pause fast, resume slow"
+
+- **`GUARDIAN` role.** A new `Config` key that can call `pause` and
+  `suspend_listing` with **no timelock**, and nothing else. It cannot
+  `unpause`, cannot approve or reinstate listings, cannot approve issuance and
+  cannot move funds. A leaked guardian key can therefore only stop the system,
+  never steal from it, so it can live on more devices (on-call phones, an
+  alerting bot) than the admin key.
+- **Resuming is deliberate.** `unpause` and reinstating a suspended listing
+  stay with the admin and the listing authority respectively; in production
+  both sit behind the multisig (§9.4), so recovery needs several people.
+- **Issuer wallet rotation.** A compromised issuer key can request issuance
+  and withdraw cashback. Niara can rotate `listing.issuer` to a new wallet via
+  a timelocked change (same `propose_change`/`execute_change` pattern, one
+  pending slot per listing), after off-chain verification of the issuer's
+  identity. The timelock gives the real issuer time to object if the request
+  itself is the attack. Until rotation, the guardian suspends the listing,
+  which stops trading and new issuance (pending batches stay unexecuted).
+
+### 9.2 Recovery after an attack
+
+Goal: if tokens are stolen or minted fraudulently, burn the compromised
+supply and reissue to the rightful holders, using the Register history as the
+source of truth.
+
+- **What it needs.** A clawback power. On Solana that is Token-2022
+  `PermanentDelegate`, which can transfer or burn from any account of the
+  mint. It can **only be set at mint creation** and never added later (proved
+  for v1's allowlist in `test_mint_extension_lock.rs`), so the decision has to
+  be made **before any production mint exists**: mints created without it can
+  never gain it.
+- **Who may hold it.** Only a Niara recovery authority: a program PDA whose
+  instruction requires a multisig approval and a timelock. **Never the
+  issuer**: an issuer with a permanent delegate can take any holder's
+  securities at will, which defeats self-custody.
+- **When it may be used.** Every forced burn needs a documented legal basis
+  (court order, regulator determination, or a corporate act within the
+  issuer's statutory powers), whose hash is recorded on-chain with the burn,
+  like `burn_with_reason`'s `reference`. Reissue goes through the normal
+  batch flow (§3.12) with the same reference.
+- **v1 decision: rejected.** `PermanentDelegate` stays on the rejected list
+  (§3.8): it can drain escrow and fee vaults, and v1 has neither the recovery
+  program nor the legal framework to justify it. The cost of that choice is
+  that v1 mints can never be clawed back. Revisit before production mints.
+
+### 9.3 Traceability
+
+- **Numbered issuance batches tied to a Register `doc_hash`** — done in v1
+  (§3.12).
+- **One mint per share class and per debenture series.** Common and preferred
+  shares, or two debenture series, are different instruments with different
+  rights; they never share a mint. The listing's `doc_hash` identifies the
+  class or series.
+- **Burns with a reason** — done in v1 for burns through the program
+  (`burn_with_reason`); direct burns are visible as unexplained supply drops
+  (invariant 11).
+- **Holder ledger at any block.** From `IssuanceExecuted`, `Settled`,
+  `TokensBurned` and the token transfers, the Register reconstructs who held
+  what at any slot. This is **probative evidence, not a substitute** for the
+  share register required by Lei 6.404/1976 (book-entry shares are kept by an
+  authorized bookkeeping institution); reconciling the two is part of the
+  production plan.
+
+### 9.4 Other measures before mainnet
+
+- **Upgrade authority** moved to a **Squads multisig**, ideally with its own
+  time delay, or the program made immutable after audit (§3.6).
+- **Operator keys** (settlement worker) in a **KMS/HSM**, minimal balances,
+  per-key rate limits; never in the frontend or in git (§5).
+- **Per-listing volume circuit breakers**: settlement volume per listing per
+  window above a threshold suspends the listing automatically (or through the
+  guardian).
+- **Alerts** on anomalous issuance (batch size vs. history, requests outside
+  business hours), large transfers, failed settlement spikes, and any
+  supply/ledger mismatch (invariants 4 and 11 checked off-chain continuously).
+- **External audit and bug bounty** before mainnet; no mainnet deploy of an
+  unaudited build.
+- **Incident-response runbook**: who pauses, who decides to resume, how users
+  and the regulator are informed, how the Register evidence is preserved.
+- **SOC 2** for the off-chain stack (matching engine, worker, Supabase).

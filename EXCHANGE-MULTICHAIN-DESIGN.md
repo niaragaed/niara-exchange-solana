@@ -610,6 +610,55 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
 Note: verify whether the July 2026 Sepolia deployment of niara-contracts is still
 live and documented; v1 needs a **new deployment anyway** (new registry + factory).
 
+### 4.1 Listing events for the Register indexer
+
+A listing becomes tradable at exactly one event on every chain: **`ListingApproved`**.
+Both paths emit it, on Solana and on EVM; there is **no separate currency event**
+(no `CurrencyListed`). The indexer tells currencies apart by `asset_class` /
+`assetClass == Currency`, which always comes with `cashback_eligible == false`, a
+zero `doc_hash` and no issuer (`Pubkey::default()` / `address(0)`).
+
+| Listing path | Solana instruction → event | EVM (`ListingRegistry`) function → event |
+|---|---|---|
+| Issuer submits (`Pending`) | `submit_listing` → `ListingSubmitted { listing, asset_mint, issuer, asset_class, doc_hash }` | `submitListing` → `ListingSubmitted(token, issuer, assetClass, docHash)` |
+| Niara approves an issuer listing (`Pending` → `Approved`) | `approve_listing` → `ListingApproved` | `approveListing` → `ListingApproved` |
+| Niara lists a currency (created `Approved`) | `list_currency` → `ListingApproved` | `listCurrency` → `ListingApproved` |
+| Reinstatement (`Suspended` → `Approved`, any class) | `approve_listing` → `ListingApproved` (new `approved_at`) | `approveListing` → `ListingApproved` (new `approvedAt`) |
+| Suspension (`Approved` → `Suspended`) | `suspend_listing` → `ListingSuspended { listing, asset_mint }` | `suspendListing` → `ListingSuspended(token)` |
+| Delisting (final) | `delist` → `ListingDelisted { listing, asset_mint }` | `delist` → `ListingDelisted(token, previousStatus)` |
+
+`ListingApproved` carries the same fields on both chains: Solana
+`{ listing, asset_mint, issuer, asset_class, cashback_eligible, doc_hash, approved_at }`,
+EVM `ListingApproved(address indexed token, address indexed issuer, AssetClass assetClass,
+bool cashbackEligible, bytes32 docHash, uint64 approvedAt)` (EVM has no separate listing
+account, so `token` plays the role of both `listing` and `asset_mint`).
+
+### 4.2 EVM vs Solana differences (intentional)
+
+Aligned on both chains: asset classes, listing status table, `ListingApproved` on
+both listing paths (§4.1), issuance batches numbered from 1 with
+`requested_at`/`resolved_at`, `reject_issuance` in any listing status,
+`approve_issuance` blocked while paused, non-zero `doc_hash` / burn `reference`,
+`Currency` never cashback-eligible, `settle` only on `Approved` `Equity` against an
+`Approved` `Currency`. What still differs, on purpose:
+
+| Topic | Solana (`niara_exchange`) | EVM (`niara-contracts`) | Why |
+|---|---|---|---|
+| Asset token origin | Issuer creates the mint; `submit_listing` checks `supply == 0` and moves the mint authority to the program PDA | Issuer deploys through `AssetTokenFactory`; the token's only minter is the `ListingRegistry` from birth (no hand-over, no "finish metadata first" step) | An EVM token's code is fixed at deploy, so a factory gives a known implementation; on Solana the issuer's mint must be accepted and checked |
+| Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
+| Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
+| Pause scope | One `Config.paused` stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together | Per contract: `ListingRegistry.pause` stops `approveIssuance`; `NiaraSettlement.pause` stops `settle`; `CashbackDistributor` withdrawals have no pause | Existing EVM pattern (one `Pausable` per contract). An incident needs one call per contract; `PAUSER_ROLE` sits with the admin on each |
+| Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
+| Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
+| Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
+| Event vs effect order | `approve_issuance` mints, then updates state and emits | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md) | EVM external calls can re-enter; SPL token CPIs cannot |
+| Fee rounding | `fee = ceil(payment × fee_bps / 10 000)`; `ZeroSellerProceeds` if the seller would get 0 | `fee = floor(...)`, reverts `PaymentAmountTooSmallForFeePrecision` if it truncates to 0 while `feeBps > 0` | Pre-existing EVM behavior, kept unchanged; both prevent fee-free trades |
+| Replay protection | `settle(order_id)` creates `["settled", order_id]`: a match settles at most once on-chain | No match id on-chain; idempotency is the off-chain unique constraint on `match_id` (§5) | Not ported yet; candidate for the EVM settle adapter work |
+| Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
+| Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, per-currency `FeeLedger`, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; no ledger accounts, no sweep | Pre-existing EVM distributor, unchanged |
+| Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; no pause | Pre-existing EVM distributor, unchanged |
+| Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
+
 ---
 
 ## 5. Off-chain (Supabase `niara-exchange-dev`)
@@ -637,13 +686,18 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   approve listing → issuer requests an issuance batch → (admin) approve batch →
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
-- **Niara-Register:** extend the indexer to capture `ListingApproved`,
-  `Settled`, `DealExecuted`, `IssuanceExecuted` and `TokensBurned` (Solana; the EVM side
-  follows when it gains issuance) on all three chains into the "Global registry" area (today empty
-  because the Exchange has not operated for real). There is **no separate
-  `CashbackCredited` event**: `Settled` and `DealExecuted` carry `fee` and
-  `cashback`, so the indexer credits the issuer's cashback from them (one
-  event per settlement or deal, nothing to correlate). Listing `doc_hash` can be
+- **Niara-Register:** extend the indexer to capture `ListingApproved`
+  (both listing paths, §4.1), `Settled`, `DealExecuted` (Solana; EVM once
+  `P2PEscrow` exists), `IssuanceExecuted` and `TokensBurned`
+  on all three chains into the "Global registry" area (today empty
+  because the Exchange has not operated for real). On EVM, `TokensBurned` is
+  emitted by each `NativeAssetToken` (not by the registry), so the indexer
+  watches every token deployed by the `AssetTokenFactory` (`AssetTokenCreated`).
+  On Solana there is **no separate `CashbackCredited` event**: `Settled` and
+  `DealExecuted` carry `fee` and `cashback`, so the indexer credits the issuer's
+  cashback from them (one event per settlement or deal, nothing to correlate).
+  On EVM, `Settled` has no `cashback` field and the `CashbackDistributor` emits
+  `CashbackCredited` in the same transaction (§4.2). Listing `doc_hash` can be
   signed and registered through Register's document signature feature.
 
 Narrative: *the Exchange operates, the Register proves it.*

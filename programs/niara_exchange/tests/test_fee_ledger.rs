@@ -46,7 +46,8 @@ fn settle_records_gross_fee_and_cashback() {
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     let mut fees = 0;
     let mut cashback = 0;
-    for (i, payment) in [1u64, 10_001, 25_000_000, 333_333].into_iter().enumerate() {
+    // 2 is the smallest payment that leaves the seller something (fee 1).
+    for (i, payment) in [2u64, 10_001, 25_000_000, 333_333].into_iter().enumerate() {
         env.settle(&m, order_id(i as u128), 1, payment).unwrap();
         fees += fee_of(payment);
         cashback += cashback_of(fee_of(payment));
@@ -107,7 +108,8 @@ fn settle_rejects_the_fee_ledger_of_another_currency() {
 }
 
 /// Anyone can transfer into the fee vault. Donations are not accounted, so
-/// on-chain invariant 4 is `vault >= unwithdrawn`; equality holds without them.
+/// between sweeps on-chain invariant 4 is `vault >= unwithdrawn`;
+/// `sweep_excess` restores equality (tests in `test_withdraw.rs`).
 #[test]
 fn donations_to_the_vault_are_not_accounted() {
     let mut env = Env::initialized();
@@ -115,22 +117,40 @@ fn donations_to_the_vault_are_not_accounted() {
     env.settle(&m, order_id(1), 1, 1_000_000).unwrap();
     let ledger_before = env.fee_ledger(&m.payment_mint);
 
-    let donor = env.funded_keypair();
-    let source = env.create_token_account(SPL_TOKEN, m.payment_mint, donor.pubkey(), 500);
-    let ix = anchor_spl::token::spl_token::instruction::transfer(
-        &SPL_TOKEN,
-        &source,
-        &fee_vault_pda(&m.payment_mint),
-        &donor.pubkey(),
-        &[],
-        500,
-    )
-    .unwrap();
-    env.send(&[ix], &[&donor]).unwrap();
+    env.donate_to_fee_vault(m.payment_mint, 500);
 
     let ledger = env.fee_ledger(&m.payment_mint);
     assert_eq!(ledger.fees_collected, ledger_before.fees_collected);
     let unwithdrawn =
         ledger.fees_collected - ledger.protocol_withdrawn - ledger.cashback_withdrawn;
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), unwithdrawn + 500);
+}
+
+/// Lamports sent to the fee vault address before `list_currency` (anyone can
+/// do it) must not block the listing: the vault is still created, rent-exempt,
+/// and owned by the right token program.
+#[test]
+fn prefunded_fee_vault_address_does_not_block_list_currency() {
+    // The runtime only lets a system account exist rent-exempt, so the smallest
+    // possible pre-fund is the 0-byte minimum (below a token account's rent);
+    // 10_000_000 is above it.
+    for (token_program, small) in [(SPL_TOKEN, true), (TOKEN_2022, true), (SPL_TOKEN, false)] {
+        let mut env = Env::initialized();
+        let prefund = if small {
+            env.svm.minimum_balance_for_rent_exemption(0)
+        } else {
+            10_000_000
+        };
+        let mint = env.create_mint(token_program, None);
+        env.svm.airdrop(&fee_vault_pda(&mint), prefund).unwrap();
+        let authority = env.listing_authority.insecure_clone();
+        env.list_currency(&authority, mint).unwrap();
+
+        let vault = env.token_account(&fee_vault_pda(&mint));
+        assert_eq!((vault.mint, vault.owner, vault.amount), (mint, vault_authority(), 0));
+        assert_eq!(env.owner_of(&fee_vault_pda(&mint)), token_program);
+        let account = env.svm.get_account(&fee_vault_pda(&mint)).unwrap();
+        let rent = env.svm.minimum_balance_for_rent_exemption(account.data.len());
+        assert!(account.lamports >= rent.max(prefund));
+    }
 }

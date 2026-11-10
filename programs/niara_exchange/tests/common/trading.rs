@@ -423,4 +423,48 @@ impl Env {
         );
         self.send(&[ix], &[treasury])
     }
+
+    pub fn sweep_excess(
+        &mut self,
+        treasury: &Keypair,
+        payment_mint: Pubkey,
+        destination: Pubkey,
+    ) -> TransactionResult {
+        let ix = ix(
+            accounts::SweepExcess {
+                treasury: treasury.pubkey(),
+                config: config_pda(),
+                payment_mint,
+                fee_ledger: fee_ledger_pda(&payment_mint),
+                vault_authority: vault_authority(),
+                fee_vault: fee_vault_pda(&payment_mint),
+                destination,
+                token_program: self.owner_of(&payment_mint),
+                event_authority: event_authority(),
+                program: program_id(),
+            },
+            instruction::SweepExcess {},
+        );
+        self.send(&[ix], &[treasury])
+    }
+
+    /// Sends `amount` of `payment_mint` straight to its fee vault through the
+    /// real token program, as any holder can (an unaccounted "donation").
+    pub fn donate_to_fee_vault(&mut self, payment_mint: Pubkey, amount: u64) {
+        let program = self.owner_of(&payment_mint);
+        let donor = self.funded_keypair();
+        let source = self.create_token_account(program, payment_mint, donor.pubkey(), amount);
+        let ix = anchor_spl::token_2022::spl_token_2022::instruction::transfer_checked(
+            &program,
+            &source,
+            &payment_mint,
+            &fee_vault_pda(&payment_mint),
+            &donor.pubkey(),
+            &[],
+            amount,
+            self.mint_decimals(&payment_mint),
+        )
+        .unwrap();
+        self.send(&[ix], &[&donor]).unwrap();
+    }
 }

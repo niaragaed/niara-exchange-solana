@@ -222,8 +222,9 @@ impl CashbackLedger {
 /// - unwithdrawn = `fees_collected - protocol_withdrawn - cashback_withdrawn`
 ///
 /// Invariant 4: the fee vault balance equals the unwithdrawn amount. Anyone
-/// can transfer tokens into the vault, so on-chain it is strictly `>=`; such
-/// donations are not accounted and cannot be withdrawn.
+/// can transfer tokens into the vault, so between sweeps it is `>=`; such
+/// donations are not accounted, cannot be withdrawn as fees or cashback, and
+/// `sweep_excess` (treasury) moves them out, restoring equality.
 #[account]
 #[derive(InitSpace, Debug)]
 pub struct FeeLedger {

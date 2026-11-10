@@ -1,5 +1,11 @@
-use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
+use anchor_lang::{prelude::*, solana_program::program_pack::Pack, system_program};
+use anchor_spl::{
+    token_2022::spl_token_2022::{
+        extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions},
+        state::{Account as TokenAccountState, Mint as MintState},
+    },
+    token_interface::{initialize_account3, InitializeAccount3, Mint, TokenInterface},
+};
 
 use crate::{
     constants::*,
@@ -99,18 +105,13 @@ pub struct ListCurrency<'info> {
     /// CHECK: PDA signer of the fee vaults; holds no data.
     #[account(seeds = [VAULT_SEED], bump)]
     pub vault_authority: UncheckedAccount<'info>,
-    /// Fee vault for this currency. A PDA rather than an ATA: anyone can create
-    /// an ATA, so an `init` on one could be front-run to block this listing.
-    #[account(
-        init,
-        payer = listing_authority,
-        seeds = [FEE_VAULT_SEED, asset_mint.key().as_ref()],
-        bump,
-        token::mint = asset_mint,
-        token::authority = vault_authority,
-        token::token_program = token_program
-    )]
-    pub fee_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    /// CHECK: fee vault for this currency, created and initialized by the
+    /// handler *after* the mint allowlist check (an Anchor `init` would run
+    /// first and fail on some rejected mints with an unrelated error). A PDA
+    /// rather than an ATA: anyone can create an ATA, so creating one could be
+    /// front-run to block this listing.
+    #[account(mut, seeds = [FEE_VAULT_SEED, asset_mint.key().as_ref()], bump)]
+    pub fee_vault: UncheckedAccount<'info>,
     #[account(
         init,
         payer = listing_authority,
@@ -124,7 +125,10 @@ pub struct ListCurrency<'info> {
 }
 
 pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
+    // Mint policy first, before anything is created for this mint.
     require_allowed_mint_extensions(&ctx.accounts.asset_mint.to_account_info())?;
+    create_fee_vault(&ctx.accounts, ctx.bumps.fee_vault)?;
+
     let now = Clock::get()?.unix_timestamp;
     let asset_class = AssetClass::Currency;
     let listing = Listing {
@@ -157,6 +161,97 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         approved_at: now,
     });
     Ok(())
+}
+
+/// Creates `["fee_vault", mint]` as a token account of `mint` owned by the vault
+/// authority: what an Anchor `token::` `init` does, but callable after the mint
+/// policy check. Like Anchor's `init`, it tolerates lamports sent to the
+/// address beforehand (anyone can do that): it then tops up, allocates and
+/// assigns instead of `create_account`, which would fail on a funded address.
+fn create_fee_vault(accounts: &ListCurrency, vault_bump: u8) -> Result<()> {
+    let mint_key = accounts.asset_mint.key();
+    let bump = [vault_bump];
+    let signer_seeds: &[&[&[u8]]] = &[&[FEE_VAULT_SEED, mint_key.as_ref(), &bump]];
+    let mint = accounts.asset_mint.to_account_info();
+    let vault = accounts.fee_vault.to_account_info();
+    let payer = accounts.listing_authority.to_account_info();
+    let token_program = accounts.token_program.key();
+    let system = accounts.system_program.key();
+
+    let space = token_account_space(&mint)?;
+    let rent = Rent::get()?.minimum_balance(space);
+    let current = vault.lamports();
+    if current == 0 {
+        system_program::create_account(
+            CpiContext::new_with_signer(
+                system,
+                system_program::CreateAccount {
+                    from: payer,
+                    to: vault.clone(),
+                },
+                signer_seeds,
+            ),
+            rent,
+            space as u64,
+            &token_program,
+        )?;
+    } else {
+        let top_up = rent.saturating_sub(current);
+        if top_up > 0 {
+            system_program::transfer(
+                CpiContext::new(
+                    system,
+                    system_program::Transfer {
+                        from: payer,
+                        to: vault.clone(),
+                    },
+                ),
+                top_up,
+            )?;
+        }
+        system_program::allocate(
+            CpiContext::new_with_signer(
+                system,
+                system_program::Allocate {
+                    account_to_allocate: vault.clone(),
+                },
+                signer_seeds,
+            ),
+            space as u64,
+        )?;
+        system_program::assign(
+            CpiContext::new_with_signer(
+                system,
+                system_program::Assign {
+                    account_to_assign: vault.clone(),
+                },
+                signer_seeds,
+            ),
+            &token_program,
+        )?;
+    }
+    initialize_account3(CpiContext::new(
+        token_program,
+        InitializeAccount3 {
+            account: vault,
+            mint,
+            authority: accounts.vault_authority.to_account_info(),
+        },
+    ))
+}
+
+/// Size of a token account for `mint`, including the account extensions its
+/// mint extensions require (same computation as Anchor's `init`). Only called
+/// on mints that passed the allowlist, so every extension type is known.
+fn token_account_space(mint: &AccountInfo) -> Result<usize> {
+    if *mint.owner != anchor_spl::token_2022::ID {
+        return Ok(TokenAccountState::LEN);
+    }
+    let data = mint.try_borrow_data()?;
+    let state = StateWithExtensions::<MintState>::unpack(&data)?;
+    let mint_extensions = state.get_extension_types()?;
+    let required = ExtensionType::get_required_init_account_extensions(&mint_extensions);
+    Ok(ExtensionType::try_calculate_account_len::<TokenAccountState>(&required)?)
 }
 
 /// Shared by `approve_listing`, `suspend_listing` and `delist`.

@@ -13,6 +13,8 @@
 //!
 //! Actions are weighted towards valid settlements so that most steps move
 //! funds; the counters checked at the end make sure the run is not vacuous.
+//! Random donations into the fee vaults and `sweep_excess` calls exercise the
+//! on-chain form of invariant 4 (`vault >= unwithdrawn`, `==` after a sweep).
 //! `PROPTEST_CASES` overrides the number of cases (default 48).
 
 mod common;
@@ -73,6 +75,8 @@ static SETTLE_REJECTED: AtomicU64 = AtomicU64::new(0);
 static WITHDRAW_OK: AtomicU64 = AtomicU64::new(0);
 static WITHDRAW_REJECTED: AtomicU64 = AtomicU64::new(0);
 static CONFIG_CHANGES: AtomicU64 = AtomicU64::new(0);
+static SWEEP_OK: AtomicU64 = AtomicU64::new(0);
+static SWEEP_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum StatusOp {
@@ -105,6 +109,9 @@ enum Action {
     /// Re-approve (or shrink) a delegation through the real token program.
     Delegate { pair: usize, seller_side: bool, amount: u64 },
     InitLedger { listing: usize, currency: usize },
+    /// Unaccounted transfer straight into a fee vault.
+    Donate { currency: usize, amount: u64 },
+    Sweep { currency: usize, intruder: bool },
 }
 
 fn action() -> impl Strategy<Value = Action> {
@@ -172,6 +179,10 @@ fn action() -> impl Strategy<Value = Action> {
             .prop_map(|(pair, seller_side, amount)| Action::Delegate { pair, seller_side, amount }),
         1 => (0..LISTINGS, prop::sample::select(vec![USD, BRL, E0]))
             .prop_map(|(listing, currency)| Action::InitLedger { listing, currency }),
+        1 => (prop::sample::select(CURRENCIES.to_vec()), 1u64..1_000_000)
+            .prop_map(|(currency, amount)| Action::Donate { currency, amount }),
+        1 => (prop::sample::select(CURRENCIES.to_vec()), prop::bool::weighted(0.1))
+            .prop_map(|(currency, intruder)| Action::Sweep { currency, intruder }),
     ]
 }
 
@@ -188,6 +199,8 @@ struct World {
     intruder: Keypair,
     /// Fees and cashback per currency, summed from `Settled` events.
     model: HashMap<usize, (u64, u64)>,
+    /// Donations per currency since its last successful sweep.
+    excess: HashMap<usize, u64>,
 }
 
 impl World {
@@ -272,6 +285,7 @@ impl World {
             treasury_dests,
             intruder,
             model: CURRENCIES.iter().map(|&c| (c, (0, 0))).collect(),
+            excess: CURRENCIES.iter().map(|&c| (c, 0)).collect(),
         }
     }
 
@@ -363,7 +377,46 @@ impl World {
                     self.ledgers.insert((listing, currency));
                 }
             }
+            Action::Donate { currency, amount } => {
+                self.env.donate_to_fee_vault(self.mints[currency], amount);
+                *self.excess.get_mut(&currency).unwrap() += amount;
+            }
+            Action::Sweep { currency, intruder } => self.sweep(currency, intruder)?,
         }
+        Ok(())
+    }
+
+    fn sweep(&mut self, currency: usize, intruder: bool) -> Result<(), TestCaseError> {
+        let mint = self.mints[currency];
+        let paused = self.config().paused;
+        let signer = if intruder {
+            self.intruder.insecure_clone()
+        } else {
+            self.env.treasury.insecure_clone()
+        };
+        let dest = self.treasury_dests[&currency];
+        let before = self.env.balance(&dest);
+        let excess = self.excess[&currency];
+        let res = self.env.sweep_excess(&signer, mint, dest);
+        if res.is_err() {
+            SWEEP_REJECTED.fetch_add(1, Relaxed);
+            prop_assert_eq!(self.env.balance(&dest), before);
+            // A valid sweep only fails when there is nothing to sweep.
+            prop_assert!(paused || intruder || excess == 0, "valid sweep of {excess} failed");
+            return Ok(());
+        }
+        SWEEP_OK.fetch_add(1, Relaxed);
+        prop_assert!(!paused, "swept while paused");
+        prop_assert!(!intruder, "swept by a non-treasury");
+        // Exactly the donations, never owed fees or cashback.
+        prop_assert_eq!(self.env.balance(&dest) - before, excess);
+        self.excess.insert(currency, 0);
+        // Invariant 4 is strict right after a sweep.
+        let ledger = self.env.fee_ledger(&mint);
+        prop_assert_eq!(
+            self.env.balance(&fee_vault_pda(&mint)),
+            ledger.unwithdrawn().unwrap()
+        );
         Ok(())
     }
 
@@ -440,6 +493,7 @@ impl World {
         prop_assert_eq!(e.asset_amount, assets);
 
         let seller_receives = after[3] - before[3];
+        prop_assert!(seller_receives > 0, "seller received nothing");
         // Invariant 1, on the actual balance changes.
         prop_assert_eq!(e.payment_amount, seller_receives + e.fee);
         prop_assert_eq!(before[0] - after[0], assets);
@@ -578,11 +632,12 @@ impl World {
                 ledger.protocol_withdrawn <= ledger.fees_collected - ledger.cashback_accrued
             );
 
-            // Invariant 4 (no donations in this harness).
+            // Invariant 4: the vault holds what is owed plus the donations
+            // not swept yet (so `>=` on-chain, `==` after every sweep).
             prop_assert_eq!(
                 self.env.balance(&fee_vault_pda(&mint)),
-                ledger.unwithdrawn().unwrap(),
-                "fee vault != unwithdrawn fees"
+                ledger.unwithdrawn().unwrap() + self.excess[&currency],
+                "fee vault != unwithdrawn fees + unswept donations"
             );
         }
 
@@ -634,13 +689,15 @@ fn invariants_hold_under_random_instruction_sequences() {
     let (ok, rejected) = (SETTLE_OK.load(Relaxed), SETTLE_REJECTED.load(Relaxed));
     let (w_ok, w_rejected) = (WITHDRAW_OK.load(Relaxed), WITHDRAW_REJECTED.load(Relaxed));
     let changes = CONFIG_CHANGES.load(Relaxed);
+    let (s_ok, s_rejected) = (SWEEP_OK.load(Relaxed), SWEEP_REJECTED.load(Relaxed));
     println!(
         "settle ok {ok} / rejected {rejected}; withdraw ok {w_ok} / rejected {w_rejected}; \
-         config changes executed {changes}"
+         sweep ok {s_ok} / rejected {s_rejected}; config changes executed {changes}"
     );
     // Not vacuous: both outcomes of every guarded path were exercised.
     assert!(ok > 0 && rejected > 0, "settle outcomes not exercised");
     assert!(w_ok > 0 && w_rejected > 0, "withdraw outcomes not exercised");
+    assert!(s_ok > 0 && s_rejected > 0, "sweep outcomes not exercised");
 }
 
 /// Deterministic sweep of invariants 8, 9 and 10: every invalid market (non-

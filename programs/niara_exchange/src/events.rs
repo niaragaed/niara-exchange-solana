@@ -91,3 +91,14 @@ pub struct ProtocolFeesWithdrawn {
     pub destination: Pubkey,
     pub amount: u64,
 }
+
+/// Unaccounted tokens (sent to the fee vault outside `settle`) swept by the
+/// treasury. `vault_balance_after` equals the unwithdrawn fees and cashback.
+#[event]
+pub struct ExcessSwept {
+    pub treasury: Pubkey,
+    pub payment_mint: Pubkey,
+    pub destination: Pubkey,
+    pub amount: u64,
+    pub vault_balance_after: u64,
+}

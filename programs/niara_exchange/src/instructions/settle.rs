@@ -183,6 +183,9 @@ pub fn handle_settle(
         accounts.config.cashback_bps,
         asset_listing.cashback_eligible,
     )?;
+    // A fill too small to pay the seller anything after the (rounded-up) fee
+    // would hand over the asset for nothing.
+    require!(split.seller_receives > 0, ExchangeError::ZeroSellerProceeds);
 
     let bump = [ctx.bumps.vault_authority];
     let signer_seeds: &[&[&[u8]]] = &[&[VAULT_SEED, &bump]];

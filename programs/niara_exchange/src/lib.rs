@@ -105,4 +105,9 @@ pub mod niara_exchange {
     pub fn withdraw_protocol_fees(ctx: Context<WithdrawProtocolFees>, amount: u64) -> Result<()> {
         instructions::withdraw::handle_withdraw_protocol_fees(ctx, amount)
     }
+
+    /// Treasury takes the fee vault's balance above what the ledger owes.
+    pub fn sweep_excess(ctx: Context<SweepExcess>) -> Result<()> {
+        instructions::withdraw::handle_sweep_excess(ctx)
+    }
 }

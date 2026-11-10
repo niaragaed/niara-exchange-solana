@@ -16,32 +16,24 @@ fn assert_rejected(extensions: &[ExtensionType], log_hint: &str) {
     let issuer = env.funded_keypair();
     let authority = env.listing_authority.insecure_clone();
     let mint = env.create_mint_2022(Some(issuer.pubkey()), extensions);
-    assert_rejected_mint(&mut env, &issuer, &authority, mint, log_hint, false);
+    assert_rejected_mint(&mut env, &issuer, &authority, mint, log_hint);
 }
 
-/// `list_currency` creates the fee vault with an Anchor `init`, which runs
-/// before the handler's allowlist check. For some mints the vault creation
-/// fails first (`currency_rejected_by_token`: Anchor cannot size the account
-/// for an unknown extension; Token-2022 refuses `InitializeAccount3` under
-/// `DefaultAccountState`). The mint is still rejected and no listing exists;
-/// only the error differs.
+/// Both paths must fail with `UnsupportedMintExtension`. `list_currency` runs
+/// the allowlist before it creates the fee vault, so mints the vault creation
+/// itself would choke on (an unknown extension type Anchor cannot size;
+/// `DefaultAccountState`, under which Token-2022 refuses `InitializeAccount3`)
+/// are still rejected by the policy, with the policy's error.
 fn assert_rejected_mint(
     env: &mut Env,
     issuer: &solana_keypair::Keypair,
     authority: &solana_keypair::Keypair,
     mint: anchor_lang::prelude::Pubkey,
     log_hint: &str,
-    currency_rejected_by_token: bool,
 ) {
     let submit = env.submit_listing(issuer, mint, AssetClass::Equity, DOC_HASH);
     let currency = env.list_currency(authority, mint);
-    let mut paths = vec![("submit_listing", submit)];
-    if !currency_rejected_by_token {
-        paths.push(("list_currency", currency));
-    } else {
-        currency.expect_err("list_currency should have failed");
-    }
-    for (path, res) in paths {
+    for (path, res) in [("submit_listing", submit), ("list_currency", currency)] {
         let logs = assert_custom_err(res, ExchangeError::UnsupportedMintExtension);
         assert!(
             logs.iter().any(|l| l.contains(log_hint)),
@@ -49,6 +41,8 @@ fn assert_rejected_mint(
         );
     }
     assert!(!env.exists(&listing_pda(&mint)), "no listing created");
+    assert!(!env.exists(&fee_vault_pda(&mint)), "no fee vault created");
+    assert!(!env.exists(&fee_ledger_pda(&mint)), "no fee ledger created");
 }
 
 macro_rules! rejects {
@@ -66,21 +60,7 @@ macro_rules! rejects {
 rejects!(rejects_permanent_delegate, PermanentDelegate);
 rejects!(rejects_transfer_fee_config, TransferFeeConfig);
 rejects!(rejects_transfer_hook, TransferHook);
-#[test]
-fn rejects_default_account_state() {
-    let mut env = Env::initialized();
-    let issuer = env.funded_keypair();
-    let authority = env.listing_authority.insecure_clone();
-    let mint = env.create_mint_2022(Some(issuer.pubkey()), &[ExtensionType::DefaultAccountState]);
-    assert_rejected_mint(
-        &mut env,
-        &issuer,
-        &authority,
-        mint,
-        "Unsupported mint extension: DefaultAccountState",
-        true,
-    );
-}
+rejects!(rejects_default_account_state, DefaultAccountState);
 rejects!(rejects_pausable, Pausable);
 rejects!(rejects_non_transferable, NonTransferable);
 rejects!(rejects_confidential_transfer, ConfidentialTransferMint);
@@ -93,7 +73,7 @@ fn rejects_unknown_extension() {
     let authority = env.listing_authority.insecure_clone();
     let mint = env.create_mint_2022(Some(issuer.pubkey()), &[ExtensionType::MetadataPointer]);
     env.corrupt_first_extension_type(&mint);
-    assert_rejected_mint(&mut env, &issuer, &authority, mint, "unknown extension type", true);
+    assert_rejected_mint(&mut env, &issuer, &authority, mint, "unknown extension type");
 }
 
 #[test]

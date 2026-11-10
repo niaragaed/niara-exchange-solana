@@ -159,10 +159,41 @@ fn fee_rounds_up_and_cashback_rounds_down() {
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 31);
     assert_eq!(env.balance(&m.seller_payment), 9_970);
     assert_eq!(env.cashback(&m).accrued, 6);
-    // 30 bps of 1 -> fee 1, seller gets 0.
-    env.settle(&m, order_id(2), 1, 1).unwrap();
+    // 30 bps of 2 -> fee 1, seller gets 1.
+    env.settle(&m, order_id(2), 1, 2).unwrap();
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 32);
-    assert_eq!(env.balance(&m.seller_payment), 9_970);
+    assert_eq!(env.balance(&m.seller_payment), 9_971);
+}
+
+/// 30 bps of 1 rounds up to a fee of 1, which would leave the seller nothing
+/// for the asset: `settle` refuses it.
+#[test]
+fn rejects_fill_that_leaves_the_seller_nothing() {
+    let mut env = Env::initialized();
+    let m = env.market(SPL_TOKEN, SPL_TOKEN);
+    let before = snapshot(&env, &m);
+    let res = env.settle(&m, order_id(1), 1, 1);
+    assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
+    assert_untouched(&env, &m, before, order_id(1));
+
+    // At the maximum fee (100 bps) the same holds: the fee is ceil(1%) = 1.
+    let admin = env.admin.insecure_clone();
+    let change = ConfigChange::FeeBps(100);
+    env.propose(&admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    env.execute(&admin, &change).unwrap();
+    let res = env.settle(&m, order_id(2), 1, 1);
+    assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
+    env.settle(&m, order_id(3), 1, 2).unwrap();
+    assert_eq!(env.balance(&m.seller_payment), 1);
+
+    // With a zero fee a 1-unit fill is fine: the seller receives it all.
+    let change = ConfigChange::FeeBps(0);
+    env.propose(&admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    env.execute(&admin, &change).unwrap();
+    env.settle(&m, order_id(4), 1, 1).unwrap();
+    assert_eq!(env.balance(&m.seller_payment), 2);
 }
 
 #[test]

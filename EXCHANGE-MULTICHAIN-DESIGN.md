@@ -80,7 +80,7 @@ tokenized listed stocks). v1 focuses on native issuance.
         │   Solana Devnet program        Ethereum Sepolia contracts    Base Sepolia contracts
         │   (Anchor, niara_exchange)     (same Solidity as Base)       (same Solidity)
         │              │                           │                           │
-        └──────────────┴──────── events (Settled, CashbackCredited, ListingApproved)
+        └──────────────┴──────── events (ListingApproved, Settled incl. cashback)
                                                    │
                                                    ▼
                                    Niara-Register indexer → "Global registry" area
@@ -118,11 +118,11 @@ interface SettlementAdapter {
 | `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `bump` |
 | `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
 | `FeeLedger` | `["fees", payment_mint]` | `payment_mint`, `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. Created by `list_currency` with the fee vault. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
-| `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent |
+| `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
 | `Deal` | `["deal", proposer, deal_id]` | `proposer`, `counterparty` (or open), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `bump` |
 | Deal vault | ATA(Deal PDA, deposited mint) | holds the proposer's deposit until accept/cancel/expiry |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
-| Fee vault | `["fee_vault", payment_mint]` token account, authority = vault authority | holds protocol fees + unclaimed cashback. Created by `list_currency`, so every `Approved` currency has one. A PDA rather than an ATA: anyone can create an ATA, so an `init` on one could be front-run to block `list_currency` |
+| Fee vault | `["fee_vault", payment_mint]` token account, authority = vault authority | holds protocol fees + unclaimed cashback (+ unaccounted donations until swept). Created by `list_currency` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so every `Approved` currency has one and a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `list_currency` |
 
 ### 3.3 Instructions
 
@@ -140,6 +140,7 @@ interface SettlementAdapter {
 | `expire_deal` | anyone, after `expires_at` | refund deposit to proposer (permissionless crank) |
 | `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault |
 | `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
+| `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
 | `propose_change` / `execute_change` | admin | timelocked fee/cashback/operator/authority changes |
 | `pause` / `unpause` | admin | circuit breaker (see below) |
 
@@ -147,7 +148,7 @@ interface SettlementAdapter {
 own accounting, but never stops a user from taking back their own escrowed
 deposit. While `paused`:
 - **blocked:** `settle`, `open_deal`, `accept_deal`, `withdraw_cashback`,
-  `withdraw_protocol_fees`. If the incident is an accounting bug (e.g.
+  `withdraw_protocol_fees`, `sweep_excess`. If the incident is an accounting bug (e.g.
   over-credited cashback), withdrawals are exactly the drain path.
 - **always allowed:** `cancel_deal` and `expire_deal` (a user reclaims their own
   deposit, which the protocol's accounting does not decide), listing actions
@@ -187,6 +188,9 @@ fee      = ceil(payment_amount * fee_bps / 10_000)      // never zero by truncat
 cashback = listing.cashback_eligible ? floor(fee * cashback_bps / 10_000) : 0
 seller_receives = payment_amount - fee
 ```
+`settle` requires `seller_receives > 0` (`ZeroSellerProceeds`): because the fee
+rounds up, a 1-unit payment with `fee_bps > 0` would otherwise hand the asset
+over for nothing. The escrow (`accept_deal`) applies the same rule.
 
 CPIs, all in one transaction (atomic — any failure reverts everything).
 Each `transfer_checked` uses its own mint's decimals; zero-amount legs (e.g.
@@ -293,7 +297,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   | `MintCloseAuthority` | the mint can be closed (and its address reused) under a live listing |
   | any other or unknown type | not reviewed, so not accepted |
 
-  Extensions are checked at listing time. Token-2022 cannot add the rejected
+  Extensions are checked at listing time, before the listing creates anything
+  for the mint (in `list_currency`, before the fee vault), so every rejected
+  mint fails with `UnsupportedMintExtension` on both paths. Token-2022 cannot add the rejected
   extensions to a mint after initialization, so the check holds for the life of
   the listing; `settle` and `open_deal` will still re-run it on both the asset
   and the payment mint as defense in depth.
@@ -322,11 +328,14 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   and two `Currency` listings, plus a delegated buyer/seller pair for every
   asset × payment combination (including invalid ones), then runs random
   sequences of `settle` (valid and invalid markets, zero amounts, replayed
-  ids, wrong signer), listing status changes, pause/unpause, both withdrawals
-  (incl. overdraws and wrong signers), timelocked fee/cashback changes with
-  out-of-range values, re-delegations and `init_cashback_ledger`. Invariants 1,
-  2, 3, 4, 5, 8, 9 and 10 are checked after every step, and the fee ledgers
-  are cross-checked against the sum of `Settled` events. `PROPTEST_CASES`
+  ids, wrong signer, fills that leave the seller nothing), listing status
+  changes, pause/unpause, both withdrawals (incl. overdraws and wrong signers),
+  timelocked fee/cashback changes with out-of-range values, re-delegations,
+  `init_cashback_ledger`, donations straight into the fee vaults and
+  `sweep_excess` (incl. wrong signers and empty sweeps). Invariants 1, 2, 3, 4,
+  5, 8, 9 and 10 are checked after every step (4 as `vault == unwithdrawn +
+  unswept donations`, so strict equality after every sweep), and the fee
+  ledgers are cross-checked against the sum of `Settled` events. `PROPTEST_CASES`
   sets the number of sequences (default 48). A mutation check (cashback
   under-recorded in the `FeeLedger`) made it fail and shrink to a minimal
   sequence. Invariants 6 and 7 come with the escrow (week 3).
@@ -340,8 +349,11 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   3. no settlement on a listing whose status ≠ `Approved`
   4. vault balance == unwithdrawn protocol fees + unwithdrawn cashback
      (`fees_collected − protocol_withdrawn − cashback_withdrawn`). Anyone can
-     transfer into a fee vault, so on-chain this is `≥`; donations are not
-     accounted and cannot be withdrawn. Fuzzing has no donations and checks `==`
+     transfer into a fee vault, so between sweeps this is `≥`; donations are
+     not accounted and cannot be withdrawn as fees or cashback.
+     `sweep_excess` moves them to the treasury, and **after a sweep it is
+     strict equality**. Fuzzing tracks donations and checks
+     `vault == unwithdrawn + unswept donations`
   5. `fee_bps ≤ MAX_FEE_BPS` always, even after timelocked changes
   6. an escrowed deposit always ends in exactly one place: counterparty (executed)
      or proposer (cancelled/expired). It is never stranded and never paid twice
@@ -360,6 +372,14 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 - FX pricing feeds: P2P deals in `Currency` use the rate the two parties agree;
   no oracle in v1. In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
   VASP rules), which matters for production but not for testnet.
+- **Bitmap replay protection.** Each settlement creates a `SettlementRecord`
+  that is never closed: ~0.00095 SOL of rent per settlement (rent-exempt
+  minimum for 9 data bytes) locked forever, growing linearly with volume.
+  Roadmap: replace the per-settlement records with bitmap pages (e.g. a
+  `["settled_page", page_no]` account of N bits, with the match id mapped to a
+  sequence number assigned by the matching engine), so one rent-exempt account
+  covers thousands of settlements. Needs a sequence space the operator cannot
+  rewind; until then, one record per match is the simple, auditable choice.
 - **Evaluate `solana-v4`.** v1 builds against the Solana 3.x crates (Anchor's
   default `solana-v3` feature). Moving to the `solana-v4` (Agave 4.3) crates is a
   roadmap item, to be evaluated once the program is feature-complete.
@@ -368,7 +388,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 
 | Component | Version | Notes |
 |---|---|---|
-| Anchor (CLI + `anchor-lang`/`anchor-spl`) | **1.2.2** | pinned per project in `Anchor.toml` `[toolchain] anchor_version`; installed with `avm` (includes the `close`-into-self and `init_if_needed` Token-2022 fixes) |
+| Anchor (CLI + `anchor-lang`/`anchor-spl`) | **1.2.2** | pinned per project in `Anchor.toml` `[toolchain] anchor_version`, as `=1.2.2` in the program's `Cargo.toml`, and in the committed `Cargo.lock` (every `anchor-*` crate resolves to 1.2.2, no 1.2.1 entries; checked 2026-11-09); installed with `avm` (includes the `close`-into-self and `init_if_needed` Token-2022 fixes) |
 | Solana crates | **3.x** (`solana-v3`, Anchor default) | `solana-v4` not enabled; see roadmap |
 | Solana CLI | **4.3.0** (Agave) | not pinned in `[toolchain]` (pinning `solana_version` switches the machine-wide active release) |
 | Rust | **1.99.1** | `anchor-lang` MSRV is 1.89 |
@@ -426,9 +446,12 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   issue token → submit listing → (admin) approve → place order → match → settle →
   issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
-- **Niara-Register:** extend the indexer to capture `ListingApproved`, `Settled`,
-  `CashbackCredited` on all three chains into the "Global registry" area (today
-  empty because the Exchange has not operated for real). Listing `doc_hash` can be
+- **Niara-Register:** extend the indexer to capture `ListingApproved` and
+  `Settled` on all three chains into the "Global registry" area (today empty
+  because the Exchange has not operated for real). There is **no separate
+  `CashbackCredited` event**: `Settled` carries `fee` and `cashback`, so the
+  indexer credits the issuer's cashback from `Settled` (one event per
+  settlement, nothing to correlate). Listing `doc_hash` can be
   signed and registered through Register's document signature feature.
 
 Narrative: *the Exchange operates, the Register proves it.*

@@ -1,6 +1,7 @@
-//! Pull-model payouts from the fee vault: issuer cashback and protocol fees.
+//! Pull-model payouts from the fee vault: issuer cashback, protocol fees and
+//! the treasury's sweep of unaccounted excess.
 //!
-//! Both are blocked while the protocol is paused. Principle (spec §3.3): a pause
+//! All three are blocked while the protocol is paused. Principle (spec §3.3): a pause
 //! stops the protocol from paying out based on its own accounting, but never
 //! stops a user from taking back their own escrowed deposit.
 
@@ -12,7 +13,7 @@ use anchor_spl::token_interface::{
 use crate::{
     constants::*,
     error::ExchangeError,
-    events::{CashbackWithdrawn, ProtocolFeesWithdrawn},
+    events::{CashbackWithdrawn, ExcessSwept, ProtocolFeesWithdrawn},
     state::*,
 };
 
@@ -175,6 +176,75 @@ pub fn handle_withdraw_protocol_fees(
         payment_mint: ctx.accounts.payment_mint.key(),
         destination: ctx.accounts.destination.key(),
         amount,
+    });
+    Ok(())
+}
+
+/// Treasury pulls the fee vault's unaccounted excess: tokens that reached the
+/// vault outside `settle` (anyone can transfer into it). Owed funds
+/// (unwithdrawn protocol fees + unwithdrawn cashback) never move here, so after
+/// a sweep the vault holds exactly what the `FeeLedger` says (invariant 4).
+#[event_cpi]
+#[derive(Accounts)]
+pub struct SweepExcess<'info> {
+    pub treasury: Signer<'info>,
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        has_one = treasury @ ExchangeError::Unauthorized
+    )]
+    pub config: Box<Account<'info, Config>>,
+    #[account(mint::token_program = token_program)]
+    pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        seeds = [FEE_LEDGER_SEED, payment_mint.key().as_ref()],
+        bump = fee_ledger.bump
+    )]
+    pub fee_ledger: Box<Account<'info, FeeLedger>>,
+    /// CHECK: PDA signer of the fee vault; holds no data.
+    #[account(seeds = [VAULT_SEED], bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+    #[account(
+        mut,
+        seeds = [FEE_VAULT_SEED, payment_mint.key().as_ref()],
+        bump = fee_ledger.vault_bump,
+        token::mint = payment_mint,
+        token::authority = vault_authority,
+        token::token_program = token_program
+    )]
+    pub fee_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = payment_mint,
+        token::token_program = token_program,
+        constraint = destination.key() != fee_vault.key() @ ExchangeError::InvalidDestination
+    )]
+    pub destination: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub token_program: Interface<'info, TokenInterface>,
+}
+
+pub fn handle_sweep_excess(ctx: Context<SweepExcess>) -> Result<()> {
+    ctx.accounts.config.require_not_paused()?;
+    let owed = ctx.accounts.fee_ledger.unwithdrawn()?;
+    let balance = ctx.accounts.fee_vault.amount;
+    let excess = balance.saturating_sub(owed);
+    require!(excess > 0, ExchangeError::NothingToSweep);
+
+    pay_out(
+        &ctx.accounts.token_program,
+        &ctx.accounts.fee_vault,
+        &ctx.accounts.payment_mint,
+        &ctx.accounts.destination,
+        &ctx.accounts.vault_authority,
+        ctx.bumps.vault_authority,
+        excess,
+    )?;
+    emit_cpi!(ExcessSwept {
+        treasury: ctx.accounts.treasury.key(),
+        payment_mint: ctx.accounts.payment_mint.key(),
+        destination: ctx.accounts.destination.key(),
+        amount: excess,
+        vault_balance_after: owed,
     });
     Ok(())
 }

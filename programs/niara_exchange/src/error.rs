@@ -64,4 +64,8 @@ pub enum ExchangeError {
     InsufficientProtocolFees,
     #[msg("Destination must not be the fee vault")]
     InvalidDestination,
+    #[msg("Seller would receive nothing after the fee")]
+    ZeroSellerProceeds,
+    #[msg("Fee vault holds no excess over the unwithdrawn fees and cashback")]
+    NothingToSweep,
 }

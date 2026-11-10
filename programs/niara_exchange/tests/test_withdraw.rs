@@ -1,5 +1,6 @@
-//! `withdraw_cashback` (listing issuer) and `withdraw_protocol_fees`
-//! (treasury): pull-model payouts from the fee vault, blocked while paused.
+//! `withdraw_cashback` (listing issuer), `withdraw_protocol_fees` and
+//! `sweep_excess` (treasury): pull-model payouts from the fee vault, blocked
+//! while paused.
 
 mod common;
 
@@ -7,7 +8,7 @@ use anchor_lang::{error::ErrorCode as AnchorError, prelude::Pubkey};
 use common::*;
 use niara_exchange::{
     error::ExchangeError,
-    events::{CashbackWithdrawn, ProtocolFeesWithdrawn},
+    events::{CashbackWithdrawn, ExcessSwept, ProtocolFeesWithdrawn},
     ConfigChange,
 };
 use solana_keypair::Keypair;
@@ -242,6 +243,135 @@ fn rotated_treasury_takes_over() {
         .unwrap();
 }
 
+// ---- sweep_excess -------------------------------------------------------------
+
+impl Setup {
+    fn sweep(&mut self) -> litesvm::types::TransactionResult {
+        let treasury = self.treasury();
+        let dest = self.treasury_dest;
+        self.env.sweep_excess(&treasury, self.m.payment_mint, dest)
+    }
+}
+
+#[test]
+fn treasury_sweeps_only_the_excess() {
+    for payment_program in [SPL_TOKEN, TOKEN_2022] {
+        let mut s = settled(payment_program);
+        s.env.donate_to_fee_vault(s.m.payment_mint, 777);
+        assert_eq!(s.vault(), FEE + 777);
+        let ledger_before = s.env.fee_ledger(&s.m.payment_mint);
+
+        let meta = s.sweep().unwrap();
+        let e = &events::<ExcessSwept>(&meta)[0];
+        assert_eq!(e.treasury, s.env.treasury.pubkey());
+        assert_eq!(e.payment_mint, s.m.payment_mint);
+        assert_eq!(e.destination, s.treasury_dest);
+        assert_eq!(e.amount, 777);
+        assert_eq!(e.vault_balance_after, FEE);
+        assert_eq!(s.env.balance(&s.treasury_dest), 777);
+
+        // Invariant 4 is strict again; the ledger is untouched.
+        assert_eq!(s.vault(), FEE);
+        s.env.assert_vault_matches_ledger(&s.m.payment_mint);
+        let ledger = s.env.fee_ledger(&s.m.payment_mint);
+        assert_eq!(
+            (ledger.fees_collected, ledger.protocol_withdrawn, ledger.cashback_withdrawn),
+            (
+                ledger_before.fees_collected,
+                ledger_before.protocol_withdrawn,
+                ledger_before.cashback_withdrawn
+            )
+        );
+        assert_custom_err(s.sweep(), ExchangeError::NothingToSweep);
+
+        // Everything owed is still there for its owners.
+        s.withdraw_cashback(CASHBACK).unwrap();
+        s.withdraw_fees(PROTOCOL).unwrap();
+        assert_eq!(s.vault(), 0);
+    }
+}
+
+#[test]
+fn sweep_without_excess_is_rejected() {
+    let mut s = settled(SPL_TOKEN);
+    assert_custom_err(s.sweep(), ExchangeError::NothingToSweep);
+    s.withdraw_fees(PROTOCOL).unwrap();
+    s.withdraw_cashback(CASHBACK / 2).unwrap();
+    assert_custom_err(s.sweep(), ExchangeError::NothingToSweep);
+    assert_eq!(s.env.balance(&s.treasury_dest), PROTOCOL);
+
+    // A fresh currency: empty vault, nothing owed.
+    let currency = s.env.listed_currency(SPL_TOKEN);
+    let treasury = s.treasury();
+    let dest = s.env.create_token_account(SPL_TOKEN, currency, treasury.pubkey(), 0);
+    let res = s.env.sweep_excess(&treasury, currency, dest);
+    assert_custom_err(res, ExchangeError::NothingToSweep);
+}
+
+/// Donations interleaved with settlements and partial withdrawals: the sweep
+/// takes exactly the donations, never owed fees or cashback.
+#[test]
+fn sweep_interleaves_with_settlements_and_withdrawals() {
+    let mut s = settled(SPL_TOKEN);
+    s.withdraw_fees(1_000_000).unwrap();
+    s.env.donate_to_fee_vault(s.m.payment_mint, 40);
+    s.withdraw_cashback(100_000).unwrap();
+    let m = s.env.trader_pair(s.m.asset_mint, s.m.payment_mint, s.issuer(), 10, PAYMENT);
+    s.env.settle(&m, order_id(2), 1, PAYMENT).unwrap();
+    s.env.donate_to_fee_vault(s.m.payment_mint, 2);
+
+    let meta = s.sweep().unwrap();
+    assert_eq!(events::<ExcessSwept>(&meta)[0].amount, 42);
+    s.env.assert_vault_matches_ledger(&s.m.payment_mint);
+    s.withdraw_fees(2 * PROTOCOL - 1_000_000).unwrap();
+    s.withdraw_cashback(2 * CASHBACK - 100_000).unwrap();
+    assert_eq!(s.vault(), 0);
+    assert_eq!(s.env.balance(&s.treasury_dest), 2 * PROTOCOL + 42);
+}
+
+#[test]
+fn only_the_treasury_sweeps() {
+    let mut s = settled(SPL_TOKEN);
+    s.env.donate_to_fee_vault(s.m.payment_mint, 500);
+    let intruders = [
+        s.env.funded_keypair(),
+        s.env.admin.insecure_clone(),
+        s.env.operator.insecure_clone(),
+        s.env.listing_authority.insecure_clone(),
+        s.issuer(),
+    ];
+    for intruder in intruders {
+        let dest = s.treasury_dest;
+        let res = s.env.sweep_excess(&intruder, s.m.payment_mint, dest);
+        assert_custom_err(res, ExchangeError::Unauthorized);
+    }
+    assert_eq!(s.vault(), FEE + 500);
+}
+
+#[test]
+fn sweep_is_blocked_while_paused() {
+    let mut s = settled(SPL_TOKEN);
+    s.env.donate_to_fee_vault(s.m.payment_mint, 500);
+    let admin = s.env.admin.insecure_clone();
+    s.env.pause(&admin).unwrap();
+    assert_custom_err(s.sweep(), ExchangeError::Paused);
+    assert_eq!(s.vault(), FEE + 500);
+    s.env.unpause(&admin).unwrap();
+    s.sweep().unwrap();
+    assert_eq!(s.vault(), FEE);
+}
+
+#[test]
+fn sweep_destination_must_hold_the_payment_mint() {
+    let mut s = settled(SPL_TOKEN);
+    s.env.donate_to_fee_vault(s.m.payment_mint, 500);
+    let treasury = s.treasury();
+    let wrong = s.env.create_token_account(SPL_TOKEN, s.m.asset_mint, treasury.pubkey(), 0);
+    let res = s.env.sweep_excess(&treasury, s.m.payment_mint, wrong);
+    assert_custom_err(res, AnchorError::ConstraintTokenMint);
+    assert_eq!(s.vault(), FEE + 500);
+}
+
 // ---- shared failure paths -----------------------------------------------------
 
 /// Pause principle (spec §3.3): a pause stops payouts based on the protocol's
@@ -275,10 +405,12 @@ fn destination_cannot_be_the_fee_vault() {
     let vault = fee_vault_pda(&s.m.payment_mint);
     let issuer = s.issuer();
     let treasury = s.treasury();
+    s.env.donate_to_fee_vault(s.m.payment_mint, 500);
     for res in [
         s.env
             .withdraw_cashback(&issuer, s.m.asset_mint, s.m.payment_mint, vault, 1),
         s.env.withdraw_protocol_fees(&treasury, s.m.payment_mint, vault, 1),
+        s.env.sweep_excess(&treasury, s.m.payment_mint, vault),
     ] {
         let err = res.expect_err("vault paid into itself");
         let dbg = format!("{:?}", err.err);

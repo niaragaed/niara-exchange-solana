@@ -388,8 +388,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 
 ### 3.10 Out of v1 scope (state it, don't fake it)
 
-Security and token-lifecycle work (guardian role, issuer key rotation,
-clawback and recovery, multisig upgrade authority, audit) is in §9.
+Security and token-lifecycle work (guardian role, issuer compromise and
+recovery, Niara-created mints with a recovery delegate, cashback protection,
+the production cybersecurity program) is in §9.
 
 - Fixed income / credit **lifecycle**: coupon payments, amortization, maturity
   redemption, default handling. In v1 these tokens trade but do not pay out;
@@ -598,7 +599,7 @@ contain it, recover from it, prove what happened.
   alerting bot) than the admin key.
 - **Resuming is deliberate.** `unpause` and reinstating a suspended listing
   stay with the admin and the listing authority respectively; in production
-  both sit behind the multisig (§9.4), so recovery needs several people.
+  both sit behind the multisig (§9.6), so recovery needs several people.
 - **Issuer wallet rotation.** A compromised issuer key can request issuance
   and withdraw cashback. Niara can rotate `listing.issuer` to a new wallet via
   a timelocked change (same `propose_change`/`execute_change` pattern, one
@@ -631,9 +632,59 @@ source of truth.
 - **v1 decision: rejected.** `PermanentDelegate` stays on the rejected list
   (§3.8): it can drain escrow and fee vaults, and v1 has neither the recovery
   program nor the legal framework to justify it. The cost of that choice is
-  that v1 mints can never be clawed back. Revisit before production mints.
+  that v1 mints can never be clawed back. Revisit before production mints;
+  the preferred production design is in §9.3.
 
-### 9.3 Traceability
+### 9.3 Issuer compromise and recovery
+
+Issuance needs two parties (§3.12): the issuer requests, Niara approves. That
+protects holders from either party alone, and it also means **Niara cannot
+reissue on its own** when the issuer's key is lost or stolen.
+
+**Recovery path (works with v1 mints).**
+1. The guardian suspends the listing (§9.1): no trading, no new requests, no
+   batch executes. Cashback withdrawals are *not* stopped by suspension
+   (listing status gates trading, not payouts), which is why §9.5 adds a
+   per-listing cashback freeze.
+2. Niara rotates `listing.issuer` to a new issuer wallet, timelocked, after
+   verifying the issuer's identity and corporate authorization off-chain.
+3. The new issuer wallet requests the reissuance batch (`doc_hash` = the
+   corporate act and the incident report); the listing authority approves it
+   once the listing is reinstated.
+
+Without step 2 the reissue cannot happen: only `listing.issuer` can request a
+batch. With v1 mints (no clawback), reissuing does not remove the compromised
+tokens, so supply grows by the reissued amount until those tokens are
+returned or burned voluntarily; the Register marks the compromised units.
+
+**Preferred production design: Niara-created mints.** The Niara program
+creates the asset mint itself (the Solana equivalent of the EVM
+`AssetTokenFactory`, §4) instead of accepting a mint the issuer made:
+- The mint authority is the `["mint_authority", asset_mint]` PDA from birth;
+  the issuer never holds it. This also **removes the "finish metadata before
+  submitting" constraint** of §3.12: the program initializes the metadata at
+  creation, with the issuer as update authority.
+- `PermanentDelegate` is set at creation to the **Niara recovery authority**
+  (program PDA + multisig approval + timelock, §9.2), never to the issuer.
+  The allowlist (§3.8) keeps rejecting `PermanentDelegate` in general and
+  accepts it only when the delegate is that recovery authority. Because the
+  delegate can also move tokens out of program-owned accounts, the recovery
+  instruction must refuse fee vaults and deal escrows (or settle them
+  explicitly) and only act on holder accounts named in the incident record.
+- Optional **`TransferHook`** restricting transfers to KYC'd wallets (a
+  Niara-vetted hook program, §3.7) limits off-platform dumping of stolen
+  tokens. It is rejected by the v1 allowlist and needs settlement and escrow
+  to pass the hook's extra accounts in their CPIs.
+
+**Honest limits.**
+- Tokens can leave Niara before the compromise is detected: sold on-platform
+  to good-faith buyers, or (without a transfer hook) moved to any wallet.
+- Burning tokens from a good-faith third party is a taking of their property:
+  it needs a legal basis, either a court order or a clause in the offering
+  document that buyers accepted (disclosed in the `doc_hash` document). The
+  technical power to claw back does not by itself make a clawback lawful.
+
+### 9.4 Traceability
 
 - **Numbered issuance batches tied to a Register `doc_hash`** — done in v1
   (§3.12).
@@ -651,20 +702,80 @@ source of truth.
   authorized bookkeeping institution); reconciling the two is part of the
   production plan.
 
-### 9.4 Other measures before mainnet
+### 9.5 Cashback protection
 
-- **Upgrade authority** moved to a **Squads multisig**, ideally with its own
-  time delay, or the program made immutable after audit (§3.6).
-- **Operator keys** (settlement worker) in a **KMS/HSM**, minimal balances,
-  per-key rate limits; never in the frontend or in git (§5).
-- **Per-listing volume circuit breakers**: settlement volume per listing per
+A stolen issuer key is first of all a way to drain accrued cashback: today
+`withdraw_cashback` pays to any account the issuer names, and suspending the
+listing does not stop it.
+- **Registered payout address.** Each listing stores a cashback payout
+  address; `withdraw_cashback` pays only there. Changing it is timelocked
+  (propose / execute, cancellable by Niara), so an attacker who takes the key
+  cannot redirect payouts before the real issuer or Niara reacts.
+- **Per-listing freeze.** The guardian can freeze cashback withdrawals for one
+  listing (a flag on the listing, checked by `withdraw_cashback`), without
+  pausing the whole protocol. Unfreezing follows "resume slow" (§9.1): the
+  listing authority behind the multisig, not the guardian. Accrual continues
+  while frozen; nothing is lost.
+- **Issuer key hygiene, checked at onboarding.** Issuers must sign from a
+  multisig (Squads on Solana, Safe on EVM) or a hardware wallet. A multisig is
+  verifiable on-chain (the issuer address is a Squads vault / Safe contract);
+  a hardware wallet can only be attested by process, so the onboarding record
+  says which one was checked and how.
+
+### 9.6 Cybersecurity program (production)
+
+**Keys.**
+- Program upgrade authority and `admin` in a **Squads multisig** (ideally
+  with its own time delay), or the program made immutable after audit (§3.6).
+- `GUARDIAN` (§9.1) is a separate key from `admin`, so stopping the system
+  never requires the keys that can change it.
+- One settlement operator key per chain, in a **KMS/HSM**, with minimal
+  balance and per-key rate limits; never in the frontend or in git (§5).
+- Documented key rotation (who, how often, how it is verified on-chain), and
+  **no key ever on a developer laptop**.
+
+**On-chain controls.**
+- Per-listing volume circuit breakers: settlement volume per listing per
   window above a threshold suspends the listing automatically (or through the
   guardian).
-- **Alerts** on anomalous issuance (batch size vs. history, requests outside
-  business hours), large transfers, failed settlement spikes, and any
+- Alerts on anomalous issuance (batch size vs. history, requests outside
+  business hours), large transfers, failed-settlement spikes, and any
   supply/ledger mismatch (invariants 4 and 11 checked off-chain continuously).
-- **External audit and bug bounty** before mainnet; no mainnet deploy of an
-  unaudited build.
-- **Incident-response runbook**: who pauses, who decides to resume, how users
-  and the regulator are informed, how the Register evidence is preserved.
-- **SOC 2** for the off-chain stack (matching engine, worker, Supabase).
+- The settlement worker is idempotent (one settlement per match, §5) and
+  rate-limited.
+
+**Off-chain infrastructure.**
+- Supabase **Row Level Security on every table**; the service-role key only on
+  the server, never in the browser or in `NEXT_PUBLIC_*`.
+- Least-privilege database roles (the indexer writes only what it indexes,
+  the worker only settlement status).
+- Backups with periodic **restore drills**.
+- Audit log of every admin action (on-chain admin actions are already events;
+  off-chain ones, such as listing review and KYC decisions, are logged too).
+
+**Frontend and users.**
+- Strict Content-Security-Policy.
+- **Transaction preview (simulation) before every signature**, showing the
+  balance changes the user is about to approve.
+- Clear-signing texts: plain-language descriptions of each instruction and
+  of each signed order intent (§3.6).
+- One official domain, with anti-phishing guidance; Niara **never asks for a
+  seed phrase**, and says so on every signing screen.
+
+**Development.**
+- 2FA on GitHub, Vercel, Supabase, Railway and the domain registrar.
+- Branch protection with required reviews and CI.
+- Secret scanning in CI (e.g. gitleaks), on top of the `.gitignore` rules.
+- Pinned dependencies with committed lockfiles and a dependency audit
+  (`cargo audit`, `npm audit`) in CI.
+- Reproducible, verifiable builds of the program, so anyone can check that
+  the deployed binary matches the audited source.
+
+**Process.**
+- External audit and public bug bounty before mainnet; no mainnet deploy of
+  an unaudited build.
+- Incident-response runbook with on-call roles: who pauses (guardian), who
+  decides to resume, how users and the regulator are informed, how the
+  Register evidence is preserved.
+- Periodic penetration tests (frontend, API, infrastructure).
+- **SOC 2** for the off-chain stack, already planned for Register.

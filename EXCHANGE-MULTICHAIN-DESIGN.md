@@ -45,8 +45,11 @@ A peer-to-peer tokenized securities exchange with **self-custody** and **curated
      its side in a per-deal escrow PDA, naming the counterparty (v1 has no
      open offers). The counterparty's acceptance executes the swap
      atomically. No operator is involved and the operator does not need to be trusted.
-4. **Fees and issuer cashback.** Each settlement charges a protocol fee in the
-   payment token; a share of that fee is credited to the issuer (pull model).
+4. **Fees and issuer cashback, always in USDT.** Each settlement or deal
+   charges a protocol fee in one currency, the **fee mint** (USDT, set in
+   `Config`): the party that receives USDT pays the fee, out of the USDT it
+   receives. A share of that fee is credited to the issuer (pull model), so
+   cashback is always in USDT too (§3.4).
 
 Accurate one-line description for pitches:
 **"Off-chain matching, atomic on-chain settlement, self-custody, curated listing."**
@@ -117,41 +120,42 @@ interface SettlementAdapter {
 
 | Account | Seeds | Fields |
 |---|---|---|
-| `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
+| `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_mint` (the USDT mint: every fee and all cashback are in it, §3.4; set at `initialize_config`, changed only through the timelock), `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
 | `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `cashback_frozen: bool` (§9.5; false at creation), `bump` |
 | `IssuanceBatch` | `["batch", listing, batch_no]` (`batch_no` as `u64` LE) | `listing`, `batch_no`, `amount`, `recipient` (wallet), `doc_hash`, `status` (`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`. Never closed: the on-chain issuance record (§3.12) |
 | Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
-| `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
-| `FeeLedger` | `["fees", payment_mint]` | `payment_mint`, `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. Created by `list_currency` with the fee vault. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
+| `CashbackLedger` | `["cashback", listing, fee_mint]` | `listing`, `payment_mint` (= the fee mint it was created for), `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` for a cashback-eligible listing and the current `Config.fee_mint`, never lazily inside `settle` |
+| `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
 | `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
 | `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
 | Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
-| Fee vault | `["fee_vault", payment_mint]` token account, authority = vault authority | holds protocol fees + unclaimed cashback (+ unaccounted donations until swept). Created by `list_currency` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so every `Approved` currency has one and a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `list_currency` |
+| Fee vault | `["fee_vault", fee_mint]` token account, authority = vault authority | **one**, in the fee mint: holds protocol fees + unclaimed cashback (+ unaccounted donations until swept). Created by `init_fee_vault` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `init_fee_vault`. Other currencies have no fee vault: no fee is ever charged in them |
 
 ### 3.3 Instructions
 
 | Instruction | Signer | Effect |
 |---|---|---|
-| `initialize_config` | admin | create `Config` |
+| `initialize_config` | admin | create `Config`, including `fee_mint` (non-default) |
+| `init_fee_vault` | anyone (payer) | for `Config.fee_mint` only (`NotFeeMint`): run the mint extension allowlist, then create the fee vault `["fee_vault", fee_mint]` and the `FeeLedger` `["fees", fee_mint]`. Called once after `initialize_config`, and once after a timelocked fee-mint change. Emits `FeeVaultInitialized { fee_mint, fee_vault, fee_ledger }` |
 | `submit_listing(asset_class, doc_hash)` | issuer | create `Listing{Pending}` for `Equity`/`FixedIncome`/`Credit`; require `issuer == asset_mint.mint_authority` and `supply == 0`; in the same instruction move the mint authority to the `["mint_authority", asset_mint]` PDA (`set_authority` CPI signed by the issuer) (§3.12) |
 | `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending` or `Approved`: create the next `IssuanceBatch{Requested}` (§3.12) |
 | `approve_issuance` / `reject_issuance` | listing_authority | approve: listing `Approved`, mint the batch to the recipient via the PDA, emit `IssuanceExecuted`; reject: close the request without minting (§3.12) |
 | `burn_with_reason(amount, reason, reference)` | holder | burn own tokens of an issuer-listed asset with reason `Redemption`/`Cancellation`, emit `TokensBurned` (§3.12) |
-| `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false` |
+| `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false`. Creates no fee vault: only the fee mint has one (`init_fee_vault`) |
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
 | `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
-| `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, payment mint) before its first settlement |
-| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates (see 3.4) |
-| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment; `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` |
-| `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges fee, accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
+| `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, `Config.fee_mint`) before the listing's first settlement or deal |
+| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint` (see 3.4) |
+| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` |
+| `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges the fee on the fee-mint leg, accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
 | `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
 | `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault; reverts while `listing.cashback_frozen` (`CashbackFrozen`) |
 | `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
 | `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
-| `propose_change` / `execute_change` | admin | timelocked fee/cashback/operator/authority changes |
+| `propose_change` / `execute_change` | admin | timelocked fee/cashback/operator/authority/fee-mint changes (fee-mint switch: §3.4) |
 | `pause` / `unpause` | admin | circuit breaker (see below) |
 
 **Pause principle.** A pause stops the protocol from paying out based on its
@@ -167,7 +171,7 @@ deposit. While `paused`:
   `list_currency`, `approve_listing`, `suspend_listing`, `delist`,
   `freeze_cashback`, `unfreeze_cashback`),
   `request_issuance` and `reject_issuance` (neither mints),
-  `init_cashback_ledger`, and admin/timelock actions.
+  `init_cashback_ledger`, `init_fee_vault`, and admin/timelock actions.
 
 Listing status gates trading, not payouts: accrued cashback and protocol fees
 stay withdrawable after the asset is delisted or the currency is suspended.
@@ -176,6 +180,39 @@ payouts: it stops `withdraw_cashback` for that listing only, and never
 trading or accrual.
 
 ### 3.4 `settle` — the core
+
+**Fee currency (v1): always USDT.** `Config.fee_mint` is the USDT mint. Every
+fee, and therefore all cashback, is charged in it, in both trading modes:
+- **Which trades are allowed.** `settle` and `FixedIncome`/`Credit` deals
+  require `payment_mint == fee_mint`. A `Currency` deal requires **exactly
+  one** leg in the fee mint: BRL ↔ USDT is fine either way round, BRL ↔ EUR is
+  rejected in v1 (`NotFeeMint`). The fee mint must also have an `Approved`
+  `Currency` listing like any payment mint, so suspending the USDT listing
+  stops USDT trading.
+- **Who pays.** The party that **receives** USDT pays the fee, deducted from
+  the USDT it receives: `fee = ceil(usdt_amount × fee_bps / 10_000)`, it gets
+  `usdt_amount − fee` (must be `> 0`, `ZeroSellerProceeds`), and the other
+  party receives its own leg in full. In `settle` and in `FixedIncome`/`Credit`
+  deals that is the seller (USDT is the payment). In a `Currency` deal it is
+  whoever receives USDT: the seller when USDT is `payment_mint`, the buyer
+  when USDT is the currency sold (`asset_mint`).
+- **Cashback** is a share of the fee, so it is in USDT too; only
+  cashback-eligible listings (never `Currency`) accrue it.
+- **One fee vault, one fee ledger** (`["fee_vault", fee_mint]`,
+  `["fees", fee_mint]`), created by `init_fee_vault`; cashback ledgers are
+  `["cashback", listing, fee_mint]`. Other currencies get no fee vault.
+- **Fee-mint switch** (`ConfigChange::FeeMint`, timelocked like any config
+  change). The seeds keep the mint, so a switch never mixes two currencies in
+  one account: after `execute_change`, `init_fee_vault` creates the new mint's
+  vault and ledger and `init_cashback_ledger` the new cashback ledgers. Fees
+  and cashback already collected stay in the old vault and stay withdrawable
+  through the old ledgers (withdrawals and `sweep_excess` are keyed by mint,
+  not by `Config.fee_mint`). Deals still open whose USDT leg is the old mint
+  can no longer be accepted (`NotFeeMint`); they are cancelled or expire as
+  usual. It is a migration tool (e.g. a redeployed test USDT), not something
+  routine.
+- Multi-currency payment with fee conversion (e.g. charging the fee of a
+  BRL ↔ EUR deal in USDT) needs a price oracle and is out of v1 (§3.10).
 
 `order_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
 `matches.id` primary key), not the maker's order id: one order can be filled by
@@ -190,12 +227,13 @@ Preconditions (all enforced on-chain):
   cannot settle the same match twice, even within the delegated amounts)
 - asset listing: `status == Approved`, `asset_class == Equity`,
   `listing.asset_mint == asset_mint`
-- payment mint: has a listing with `asset_class == Currency` and
-  `status == Approved`
+- payment mint: `payment_mint == config.fee_mint` (`NotFeeMint`), and it has
+  a listing with `asset_class == Currency` and `status == Approved`
 - mint policy re-run on both mints (extension allowlist; asset mint has no
   freeze authority)
 - token accounts: correct owner (buyer/seller wallet), correct mint, correct
-  token program; fee vault and cashback ledger are the PDAs for this pair
+  token program; fee vault and cashback ledger are the PDAs for the fee mint
+  (and this listing)
 - seller's asset account `delegate == vault_authority` and `delegated_amount ≥ asset_amount`
 - buyer's payment account `delegate == vault_authority` and `delegated_amount ≥ payment_amount`
 
@@ -246,14 +284,17 @@ bilateral deal (OTC / block trade / counteroffers):
 **P2P escrow rules (v1, implemented).**
 - **Markets.** The asset listing must be `Approved` and `FixedIncome`,
   `Credit` or `Currency` (`WrongTradingMode` for `Equity`); the payment mint
-  must have an `Approved` `Currency` listing (`InvalidPaymentMint`), and the
-  two mints must differ (`SameMint`). `open_deal` and `accept_deal` re-run the
+  must have an `Approved` `Currency` listing (`InvalidPaymentMint`), the
+  two mints must differ (`SameMint`), and one leg must be the fee mint
+  (`NotFeeMint`, §3.4): the payment for `FixedIncome`/`Credit`, either leg for
+  `Currency`. `open_deal` and `accept_deal` re-run the
   mint extension allowlist on both mints, and the freeze-authority check on
   issuer-listed assets (a `Currency` sold as the asset may have one, like any
   listed currency, §3.8).
 - **Currency deals** (e.g. BRL ↔ USDT): `asset_mint` is the currency being
-  sold, `payment_mint` the other one. The fee is charged in `payment_mint`
-  and the cashback is zero (`Currency` is never cashback-eligible, so no
+  sold, `payment_mint` the other one; exactly one of them is USDT. The fee is
+  charged in USDT, on whichever leg it is, and paid by the party receiving it
+  (§3.4); the cashback is zero (`Currency` is never cashback-eligible, so no
   `CashbackLedger` exists for it; `accept_deal` takes the ledger as an
   optional account and requires it only for eligible listings,
   `MissingCashbackLedger`).
@@ -273,14 +314,21 @@ bilateral deal (OTC / block trade / counteroffers):
   signs and delivers its side **directly** from its own accounts (no
   delegate); the vault is released by the `Deal` PDA.
 - **Execution** (`accept_deal`, one instruction, atomic), with the same math
-  as `settle` (§3.4) and the fee in force at acceptance:
-  `fee = ceil(payment_amount × fee_bps / 10_000)`, `seller_receives > 0`
-  required (`ZeroSellerProceeds`, also checked at `open_deal` with the fee in
-  force then), cashback by `listing.cashback_eligible`.
-  - proposer sells: vault → counterparty (asset); counterparty → proposer
-    (`seller_receives`); counterparty → fee vault (`fee`).
-  - proposer buys: counterparty → proposer (asset); vault → counterparty
-    (`seller_receives`); vault → fee vault (`fee`).
+  as `settle` (§3.4) and the fee in force at acceptance, applied to the
+  **USDT leg** (`usdt_amount` = `payment_amount`, or `asset_amount` when the
+  currency sold is USDT): `fee = ceil(usdt_amount × fee_bps / 10_000)`, the
+  USDT receiver's share `usdt_amount − fee > 0` required
+  (`ZeroSellerProceeds`, also checked at `open_deal` with the fee in force
+  then), cashback by `listing.cashback_eligible`. Two legs, each moved in full
+  except that the USDT leg is split between its receiver and the fee vault:
+  - **escrowed leg**: vault → counterparty (deposit, minus `fee` if it is the
+    USDT leg, plus any `vault_excess`); vault → fee vault (`fee`, if USDT leg).
+  - **delivered leg**: counterparty → proposer (its side, minus `fee` if it
+    is the USDT leg); counterparty → fee vault (`fee`, if USDT leg).
+  For `FixedIncome`/`Credit` (USDT = payment) that reads: proposer sells →
+  the counterparty pays `seller_receives` to the proposer and `fee` to the fee
+  vault; proposer buys → the vault pays `seller_receives` to the counterparty
+  and `fee` to the fee vault. `DealExecuted` reports `fee_mint`.
   Then `FeeLedger`/`CashbackLedger` are updated as in `settle`, the vault is
   closed (rent to the proposer) and the deal becomes `Executed`.
 - **Refunds.** `cancel_deal`: proposer only (`Unauthorized`), while `Open`
@@ -305,8 +353,8 @@ bilateral deal (OTC / block trade / counteroffers):
 - **Fee changes.** The fee is read at acceptance, as in `settle`. A fee
   change is timelocked and capped at `MAX_FEE_BPS`, and the proposer can
   cancel at any time while the deal is open.
-- **Events.** `DealOpened`, `DealExecuted` (with `fee`, `cashback` and
-  `vault_excess`; same accounting as `Settled`), `DealCancelled`,
+- **Events.** `DealOpened`, `DealExecuted` (with `fee_mint`, `fee`,
+  `cashback` and `vault_excess`; same accounting as `Settled`), `DealCancelled`,
   `DealExpired`.
 
 Why this split is sound: in P2P mode **both parties sign their own transaction**,
@@ -363,7 +411,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 - PDA signer only through `CpiContext::new_with_signer` with the vault seeds
 - Timelock reads `Clock::get()?.unix_timestamp`
 - **Mint extension allowlist** (implemented in `mint_policy.rs`, enforced by
-  `submit_listing` and `list_currency`). Accepted: SPL Token mints, and
+  `submit_listing`, `list_currency` and `init_fee_vault`). Accepted: SPL Token mints, and
   Token-2022 mints whose only extensions are `MetadataPointer` and/or
   `TokenMetadata`. Everything else is rejected with `UnsupportedMintExtension`,
   including extension types the program does not know. It is an allowlist, not
@@ -381,8 +429,8 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   | any other or unknown type | not reviewed, so not accepted |
 
   Extensions are checked at listing time, before the listing creates anything
-  for the mint (in `list_currency`, before the fee vault), so every rejected
-  mint fails with `UnsupportedMintExtension` on both paths. Token-2022 cannot add the rejected
+  for the mint, and by `init_fee_vault` before it creates the fee vault, so
+  every rejected mint fails with `UnsupportedMintExtension` on every path. Token-2022 cannot add the rejected
   extensions to a mint after initialization, so the check holds for the life of
   the listing; `settle`, `open_deal` and `accept_deal` still re-run it on both
   the asset and the payment mint as defense in depth.
@@ -456,7 +504,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):
   1. `payment_amount == seller_receives + fee` for every settlement
-  2. `Σ cashback accrued ≤ Σ fees collected` per payment mint
+  2. `Σ cashback accrued ≤ Σ fees collected` per fee mint
      (`FeeLedger.cashback_accrued ≤ FeeLedger.fees_collected`, and
      `FeeLedger.cashback_accrued == Σ CashbackLedger.accrued` for that mint)
   3. no settlement on a listing whose status ≠ `Approved`
@@ -481,6 +529,10 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
       directly through the token program, so on-chain this is `≤` (§3.12);
       tests and fuzzing have no direct burns and check `==`. No batch executes
       unless the listing is `Approved` and the protocol is not paused
+  12. fees are only ever charged in `Config.fee_mint` (USDT): no `FeeLedger`
+      or fee vault exists for any other mint, every executed trade has one
+      leg in the fee mint, and the party receiving that leg gets
+      `amount − fee` while the other party receives its leg in full
 
 ### 3.10 Out of v1 scope (state it, don't fake it)
 
@@ -492,7 +544,14 @@ the production cybersecurity program) is in §9.
   redemption, default handling. In v1 these tokens trade but do not pay out;
   the lifecycle (snapshot of holders + on-chain distribution) is roadmap.
 - FX pricing feeds: P2P deals in `Currency` use the rate the two parties agree;
-  no oracle in v1. In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
+  no oracle in v1.
+- **Multi-currency payment.** v1 charges every fee in USDT, so `settle` pays
+  only in USDT and a `Currency` deal needs a USDT leg (§3.4). Paying in other
+  currencies (BRL ↔ EUR deals, equities priced in BRL) while still charging
+  the fee and the cashback in USDT needs a **price oracle** to convert the fee
+  on-chain (e.g. Pyth or Switchboard feeds, with staleness and confidence
+  checks), or per-currency fee vaults with their own cashback ledgers (which
+  v1 removed). Roadmap. In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
   VASP rules), which matters for production but not for testnet.
 - **Bitmap replay protection.** Each settlement creates a `SettlementRecord`
   that is never closed: ~0.00095 SOL of rent per settlement (rent-exempt
@@ -655,7 +714,8 @@ both listing paths (§4.1), issuance batches numbered from 1 with
 | Fee rounding | `fee = ceil(payment × fee_bps / 10 000)`; `ZeroSellerProceeds` if the seller would get 0 | `fee = floor(...)`, reverts `PaymentAmountTooSmallForFeePrecision` if it truncates to 0 while `feeBps > 0` | Pre-existing EVM behavior, kept unchanged; both prevent fee-free trades |
 | Replay protection | `settle(order_id)` creates `["settled", order_id]`: a match settles at most once on-chain | No match id on-chain; idempotency is the off-chain unique constraint on `match_id` (§5) | Not ported yet; candidate for the EVM settle adapter work |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
-| Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, per-currency `FeeLedger`, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; no ledger accounts, no sweep | Pre-existing EVM distributor, unchanged |
+| Fee currency | Always `Config.fee_mint` (USDT): `settle` pays in USDT, a `Currency` deal needs a USDT leg, the USDT receiver pays the fee (§3.4) | The payment token of each settlement | Not aligned yet: the EVM side keeps the pre-existing per-payment-token fee until it adopts the USDT rule |
+| Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; no ledger accounts, no sweep | Pre-existing EVM distributor, unchanged |
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; no pause | Pre-existing EVM distributor, unchanged |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 

@@ -1,7 +1,9 @@
 //! Shared LiteSVM harness. Requires `anchor build` first (loads the `.so`).
 #![allow(dead_code)]
 
+mod issuance;
 mod trading;
+pub use issuance::*;
 pub use trading::*;
 
 use std::str::FromStr;
@@ -400,6 +402,8 @@ impl Env {
                 issuer: issuer.pubkey(),
                 asset_mint: mint,
                 listing: listing_pda(&mint),
+                mint_authority: mint_authority_pda(&mint),
+                token_program: self.owner_of(&mint),
                 system_program: system_program::ID,
                 event_authority: event_authority(),
                 program: program_id(),

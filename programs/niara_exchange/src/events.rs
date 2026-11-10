@@ -3,7 +3,7 @@
 
 use anchor_lang::prelude::*;
 
-use crate::state::{AssetClass, ConfigChange};
+use crate::state::{AssetClass, BurnReason, ConfigChange};
 
 #[event]
 pub struct PauseSet {
@@ -90,6 +90,46 @@ pub struct ProtocolFeesWithdrawn {
     pub payment_mint: Pubkey,
     pub destination: Pubkey,
     pub amount: u64,
+}
+
+#[event]
+pub struct IssuanceRequested {
+    pub listing: Pubkey,
+    pub asset_mint: Pubkey,
+    pub batch_no: u64,
+    pub amount: u64,
+    pub recipient: Pubkey,
+    pub doc_hash: [u8; 32],
+}
+
+/// A batch was minted. `recipient` is the holder wallet; `destination` the
+/// token account (owned by `recipient`) that received the tokens.
+#[event]
+pub struct IssuanceExecuted {
+    pub asset_mint: Pubkey,
+    pub batch_no: u64,
+    pub amount: u64,
+    pub recipient: Pubkey,
+    pub doc_hash: [u8; 32],
+    pub destination: Pubkey,
+}
+
+#[event]
+pub struct IssuanceRejected {
+    pub asset_mint: Pubkey,
+    pub batch_no: u64,
+    pub amount: u64,
+    pub recipient: Pubkey,
+}
+
+#[event]
+pub struct TokensBurned {
+    pub asset_mint: Pubkey,
+    pub holder: Pubkey,
+    pub holder_account: Pubkey,
+    pub amount: u64,
+    pub reason: BurnReason,
+    pub reference: [u8; 32],
 }
 
 /// Unaccounted tokens (sent to the fee vault outside `settle`) swept by the

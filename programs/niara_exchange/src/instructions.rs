@@ -1,5 +1,6 @@
 pub mod cashback;
 pub mod config;
+pub mod issuance;
 pub mod listing;
 pub mod pause;
 pub mod settle;
@@ -8,6 +9,7 @@ pub mod withdraw;
 
 pub use cashback::*;
 pub use config::*;
+pub use issuance::*;
 pub use listing::*;
 pub use pause::*;
 pub use settle::*;

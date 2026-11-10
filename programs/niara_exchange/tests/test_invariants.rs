@@ -15,6 +15,11 @@
 //! funds; the counters checked at the end make sure the run is not vacuous.
 //! Random donations into the fee vaults and `sweep_excess` calls exercise the
 //! on-chain form of invariant 4 (`vault >= unwithdrawn`, `==` after a sweep).
+//! Issuance requests, approvals/rejections (incl. on suspended or delisted
+//! listings and while paused) and burns check invariant 11 on the four
+//! issuer listings. Their trader fixtures hold balances written directly
+//! (outside supply); issuance goes to a separate holder per listing, and only
+//! that holder burns, so `supply == issued - burned` stays exact.
 //! `PROPTEST_CASES` overrides the number of cases (default 48).
 
 mod common;
@@ -27,8 +32,10 @@ use std::{
 use anchor_lang::prelude::Pubkey;
 use common::*;
 use niara_exchange::{
-    events::Settled, math::split_payment, AssetClass, CashbackLedger, Config, ConfigChange,
-    Listing, ListingStatus, BPS_DENOMINATOR, MAX_FEE_BPS,
+    events::{IssuanceExecuted, Settled, TokensBurned},
+    math::split_payment,
+    AssetClass, BurnReason, CashbackLedger, Config, ConfigChange, Listing, ListingStatus,
+    BPS_DENOMINATOR, MAX_FEE_BPS,
 };
 use proptest::{
     prelude::*,
@@ -77,6 +84,8 @@ static WITHDRAW_REJECTED: AtomicU64 = AtomicU64::new(0);
 static CONFIG_CHANGES: AtomicU64 = AtomicU64::new(0);
 static SWEEP_OK: AtomicU64 = AtomicU64::new(0);
 static SWEEP_REJECTED: AtomicU64 = AtomicU64::new(0);
+static ISSUE_OK: AtomicU64 = AtomicU64::new(0);
+static BURN_OK: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum StatusOp {
@@ -112,7 +121,16 @@ enum Action {
     /// Unaccounted transfer straight into a fee vault.
     Donate { currency: usize, amount: u64 },
     Sweep { currency: usize, intruder: bool },
+    /// Issuance on one of `ISSUER_LISTINGS` (index into `self.mints`).
+    RequestIssuance { listing: usize, amount: u64, intruder: bool },
+    /// Approve or reject the oldest open batch of the listing.
+    ResolveIssuance { listing: usize, approve: bool, intruder: bool },
+    /// The listing's holder burns `permille` of its balance (above 1000 overdraws).
+    Burn { listing: usize, permille: u16, redemption: bool },
 }
+
+/// Listings with an issuer, so with Niara-approved issuance.
+const ISSUER_LISTINGS: [usize; 4] = [E0, E1, FI, CR];
 
 fn action() -> impl Strategy<Value = Action> {
     let pair = prop_oneof![4 => 0..VALID_PAIRS, 1 => 0..PAIRS.len()];
@@ -183,6 +201,36 @@ fn action() -> impl Strategy<Value = Action> {
             .prop_map(|(currency, amount)| Action::Donate { currency, amount }),
         1 => (prop::sample::select(CURRENCIES.to_vec()), prop::bool::weighted(0.1))
             .prop_map(|(currency, intruder)| Action::Sweep { currency, intruder }),
+        3 => (
+            prop::sample::select(ISSUER_LISTINGS.to_vec()),
+            prop_oneof![8 => 1u64..1_000_000, 1 => Just(0u64)],
+            prop::bool::weighted(0.1),
+        )
+            .prop_map(|(listing, amount, intruder)| Action::RequestIssuance {
+                listing,
+                amount,
+                intruder,
+            }),
+        3 => (
+            prop::sample::select(ISSUER_LISTINGS.to_vec()),
+            prop::bool::weighted(0.8),
+            prop::bool::weighted(0.1),
+        )
+            .prop_map(|(listing, approve, intruder)| Action::ResolveIssuance {
+                listing,
+                approve,
+                intruder,
+            }),
+        2 => (
+            prop::sample::select(ISSUER_LISTINGS.to_vec()),
+            prop_oneof![4 => 0u16..=1000, 1 => 1001u16..1100],
+            any::<bool>(),
+        )
+            .prop_map(|(listing, permille, redemption)| Action::Burn {
+                listing,
+                permille,
+                redemption,
+            }),
     ]
 }
 
@@ -201,6 +249,13 @@ struct World {
     model: HashMap<usize, (u64, u64)>,
     /// Donations per currency since its last successful sweep.
     excess: HashMap<usize, u64>,
+    /// Per issuer listing: the holder that receives issuance and burns, and
+    /// its asset account.
+    holders: HashMap<usize, (Keypair, Pubkey)>,
+    /// Per issuer listing: open (requested, unresolved) batch numbers, oldest first.
+    open_batches: HashMap<usize, Vec<u64>>,
+    /// Per issuer listing: (Σ `IssuanceExecuted`, Σ `TokensBurned`).
+    issuance: HashMap<usize, (u64, u64)>,
 }
 
 impl World {
@@ -274,8 +329,19 @@ impl World {
             })
             .collect();
 
+        let mut holders = HashMap::new();
+        for listing in ISSUER_LISTINGS {
+            let holder = env.funded_keypair();
+            let program = env.owner_of(&mints[listing]);
+            let account = env.create_token_account(program, mints[listing], holder.pubkey(), 0);
+            holders.insert(listing, (holder, account));
+        }
+
         let intruder = env.funded_keypair();
         World {
+            holders,
+            open_batches: ISSUER_LISTINGS.iter().map(|&l| (l, Vec::new())).collect(),
+            issuance: ISSUER_LISTINGS.iter().map(|&l| (l, (0, 0))).collect(),
             env,
             mints,
             issuers,
@@ -382,7 +448,152 @@ impl World {
                 *self.excess.get_mut(&currency).unwrap() += amount;
             }
             Action::Sweep { currency, intruder } => self.sweep(currency, intruder)?,
+            Action::RequestIssuance {
+                listing,
+                amount,
+                intruder,
+            } => self.request_issuance(listing, amount, intruder)?,
+            Action::ResolveIssuance {
+                listing,
+                approve,
+                intruder,
+            } => self.resolve_issuance(listing, approve, intruder)?,
+            Action::Burn {
+                listing,
+                permille,
+                redemption,
+            } => self.burn(listing, permille, redemption)?,
         }
+        Ok(())
+    }
+
+    fn request_issuance(
+        &mut self,
+        listing: usize,
+        amount: u64,
+        intruder: bool,
+    ) -> Result<(), TestCaseError> {
+        let mint = self.mints[listing];
+        let before = self.env.listing(&mint);
+        let signer = if intruder {
+            self.intruder.insecure_clone()
+        } else {
+            self.issuers[listing].insecure_clone()
+        };
+        let recipient = self.holders[&listing].0.pubkey();
+        let res = self
+            .env
+            .request_issuance(&signer, mint, amount, recipient, ISSUANCE_DOC);
+        let issuable = matches!(before.status, ListingStatus::Pending | ListingStatus::Approved);
+        if res.is_err() {
+            prop_assert!(
+                intruder || !issuable || amount == 0,
+                "valid issuance request failed"
+            );
+            prop_assert_eq!(self.env.listing(&mint).next_batch_no, before.next_batch_no);
+            return Ok(());
+        }
+        prop_assert!(!intruder, "issuance requested by a non-issuer");
+        prop_assert!(issuable, "issuance requested on a {:?} listing", before.status);
+        prop_assert!(amount > 0);
+        prop_assert_eq!(self.env.listing(&mint).next_batch_no, before.next_batch_no + 1);
+        self.open_batches
+            .get_mut(&listing)
+            .unwrap()
+            .push(before.next_batch_no);
+        Ok(())
+    }
+
+    fn resolve_issuance(
+        &mut self,
+        listing: usize,
+        approve: bool,
+        intruder: bool,
+    ) -> Result<(), TestCaseError> {
+        // Prefer the chosen listing; otherwise any listing with an open batch.
+        let listing = std::iter::once(listing)
+            .chain(ISSUER_LISTINGS)
+            .find(|l| !self.open_batches[l].is_empty())
+            .unwrap_or(listing);
+        let Some(&batch_no) = self.open_batches[&listing].first() else {
+            return Ok(());
+        };
+        let mint = self.mints[listing];
+        let status = self.env.listing(&mint).status;
+        let paused = self.config().paused;
+        let supply = self.env.mint_supply(&mint);
+        let signer = if intruder {
+            self.intruder.insecure_clone()
+        } else {
+            self.env.listing_authority.insecure_clone()
+        };
+        let res = if approve {
+            let dest = self.holders[&listing].1;
+            self.env.approve_issuance(&signer, mint, batch_no, dest)
+        } else {
+            self.env.reject_issuance(&signer, mint, batch_no)
+        };
+        let meta = match res {
+            Err(_) => {
+                prop_assert_eq!(self.env.mint_supply(&mint), supply, "failed resolve minted");
+                let expected_to_fail =
+                    intruder || (approve && (paused || status != ListingStatus::Approved));
+                prop_assert!(expected_to_fail, "valid resolution of batch {batch_no} failed");
+                return Ok(());
+            }
+            Ok(meta) => meta,
+        };
+        prop_assert!(!intruder, "batch resolved by a non-listing-authority");
+        self.open_batches.get_mut(&listing).unwrap().remove(0);
+        if approve {
+            ISSUE_OK.fetch_add(1, Relaxed);
+            prop_assert!(!paused, "issued while paused");
+            prop_assert_eq!(status, ListingStatus::Approved, "issued on a non-Approved listing");
+            let e = &events::<IssuanceExecuted>(&meta)[0];
+            prop_assert_eq!(e.batch_no, batch_no);
+            prop_assert_eq!(self.env.mint_supply(&mint) - supply, e.amount);
+            self.issuance.get_mut(&listing).unwrap().0 += e.amount;
+        } else {
+            prop_assert_eq!(self.env.mint_supply(&mint), supply);
+        }
+        Ok(())
+    }
+
+    fn burn(&mut self, listing: usize, permille: u16, redemption: bool) -> Result<(), TestCaseError> {
+        // Prefer the chosen listing; otherwise any holder with a balance.
+        let listing = std::iter::once(listing)
+            .chain(ISSUER_LISTINGS)
+            .find(|l| self.env.balance(&self.holders[l].1) > 0)
+            .unwrap_or(listing);
+        let mint = self.mints[listing];
+        let (holder, account) = {
+            let (h, a) = &self.holders[&listing];
+            (h.insecure_clone(), *a)
+        };
+        let balance = self.env.balance(&account);
+        let amount = scaled(balance, permille);
+        let reason = if redemption {
+            BurnReason::Redemption
+        } else {
+            BurnReason::Cancellation
+        };
+        let res = self
+            .env
+            .burn_with_reason(&holder, mint, account, amount, reason, BURN_REF);
+        let meta = match res {
+            Err(_) => {
+                prop_assert_eq!(self.env.balance(&account), balance);
+                prop_assert!(amount == 0 || amount > balance, "valid burn of {amount} failed");
+                return Ok(());
+            }
+            Ok(meta) => meta,
+        };
+        BURN_OK.fetch_add(1, Relaxed);
+        prop_assert!(amount > 0 && amount <= balance);
+        let e = &events::<TokensBurned>(&meta)[0];
+        prop_assert_eq!((e.amount, e.reason), (amount, reason));
+        prop_assert_eq!(balance - self.env.balance(&account), amount);
+        self.issuance.get_mut(&listing).unwrap().1 += amount;
         Ok(())
     }
 
@@ -641,6 +852,17 @@ impl World {
             );
         }
 
+        // Invariant 11: supply == Σ executed batches − Σ burns, on-chain
+        // counters and events agreeing.
+        for listing in ISSUER_LISTINGS {
+            let mint = self.mints[listing];
+            let l = self.env.listing(&mint);
+            let (issued, burned) = self.issuance[&listing];
+            prop_assert_eq!((l.issued, l.burned), (issued, burned), "listing vs events");
+            prop_assert_eq!(self.env.mint_supply(&mint), issued - burned, "supply");
+            prop_assert_eq!(self.env.mint_authority(&mint), Some(mint_authority_pda(&mint)));
+        }
+
         // Invariant 9: no Currency listing ever has a cashback ledger.
         for listing in CURRENCIES {
             for currency in [USD, BRL, E0] {
@@ -690,14 +912,17 @@ fn invariants_hold_under_random_instruction_sequences() {
     let (w_ok, w_rejected) = (WITHDRAW_OK.load(Relaxed), WITHDRAW_REJECTED.load(Relaxed));
     let changes = CONFIG_CHANGES.load(Relaxed);
     let (s_ok, s_rejected) = (SWEEP_OK.load(Relaxed), SWEEP_REJECTED.load(Relaxed));
+    let (issued, burned) = (ISSUE_OK.load(Relaxed), BURN_OK.load(Relaxed));
     println!(
         "settle ok {ok} / rejected {rejected}; withdraw ok {w_ok} / rejected {w_rejected}; \
-         sweep ok {s_ok} / rejected {s_rejected}; config changes executed {changes}"
+         sweep ok {s_ok} / rejected {s_rejected}; batches executed {issued}; \
+         burns {burned}; config changes executed {changes}"
     );
     // Not vacuous: both outcomes of every guarded path were exercised.
     assert!(ok > 0 && rejected > 0, "settle outcomes not exercised");
     assert!(w_ok > 0 && w_rejected > 0, "withdraw outcomes not exercised");
     assert!(s_ok > 0 && s_rejected > 0, "sweep outcomes not exercised");
+    assert!(issued > 0 && burned > 0, "issuance paths not exercised");
 }
 
 /// Deterministic sweep of invariants 8, 9 and 10: every invalid market (non-

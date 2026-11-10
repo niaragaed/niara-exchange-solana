@@ -6,7 +6,6 @@ mod common;
 use anchor_lang::error::ErrorCode as AnchorError;
 use common::*;
 use niara_exchange::{FeeLedger, BPS_DENOMINATOR};
-use solana_signer::Signer;
 
 fn fee_of(payment: u64) -> u64 {
     (payment * FEE_BPS as u64).div_ceil(BPS_DENOMINATOR as u64)

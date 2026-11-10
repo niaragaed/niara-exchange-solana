@@ -68,4 +68,16 @@ pub enum ExchangeError {
     ZeroSellerProceeds,
     #[msg("Fee vault holds no excess over the unwithdrawn fees and cashback")]
     NothingToSweep,
+    #[msg("Asset mint must have zero supply when the listing is submitted")]
+    NonZeroSupply,
+    #[msg("Issuance can only be requested while the listing is Pending or Approved")]
+    ListingNotIssuable,
+    #[msg("Issuance batch was already executed or rejected")]
+    BatchNotRequested,
+    #[msg("Destination is not owned by the batch recipient")]
+    WrongRecipient,
+    #[msg("reference must not be empty")]
+    EmptyReference,
+    #[msg("Currency listings are not issued through Niara")]
+    CurrencyNotIssued,
 }

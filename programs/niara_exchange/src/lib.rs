@@ -80,6 +80,37 @@ pub mod niara_exchange {
         instructions::listing::handle_delist(ctx)
     }
 
+    // ---- Niara-approved issuance (spec §3.12) ----------------------------
+
+    /// Issuer proposes a numbered batch; mints nothing.
+    pub fn request_issuance(
+        ctx: Context<RequestIssuance>,
+        amount: u64,
+        recipient: Pubkey,
+        doc_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::issuance::handle_request_issuance(ctx, amount, recipient, doc_hash)
+    }
+
+    /// Listing authority executes a batch: the program mints via its PDA.
+    pub fn approve_issuance(ctx: Context<ApproveIssuance>) -> Result<()> {
+        instructions::issuance::handle_approve_issuance(ctx)
+    }
+
+    pub fn reject_issuance(ctx: Context<RejectIssuance>) -> Result<()> {
+        instructions::issuance::handle_reject_issuance(ctx)
+    }
+
+    /// Holder burns its own tokens, with a reason and a document reference.
+    pub fn burn_with_reason(
+        ctx: Context<BurnWithReason>,
+        amount: u64,
+        reason: BurnReason,
+        reference: [u8; 32],
+    ) -> Result<()> {
+        instructions::issuance::handle_burn_with_reason(ctx, amount, reason, reference)
+    }
+
     // ---- Order-book settlement and cashback ------------------------------
 
     pub fn init_cashback_ledger(ctx: Context<InitCashbackLedger>) -> Result<()> {

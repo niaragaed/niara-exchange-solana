@@ -2,9 +2,13 @@ use anchor_lang::{prelude::*, solana_program::program_pack::Pack, system_program
 use anchor_spl::{
     token_2022::spl_token_2022::{
         extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions},
+        instruction::AuthorityType,
         state::{Account as TokenAccountState, Mint as MintState},
     },
-    token_interface::{initialize_account3, InitializeAccount3, Mint, TokenInterface},
+    token_interface::{
+        initialize_account3, set_authority, InitializeAccount3, Mint, SetAuthority,
+        TokenInterface,
+    },
 };
 
 use crate::{
@@ -17,11 +21,13 @@ use crate::{
 
 /// Issuer-submitted listing for `Equity` / `FixedIncome` / `Credit`.
 /// `InterfaceAccount<Mint>` accepts SPL Token and Token-2022 mints.
+/// The issuer's mint authority moves to the program here (spec §3.12).
 #[event_cpi]
 #[derive(Accounts)]
 pub struct SubmitListing<'info> {
     #[account(mut)]
     pub issuer: Signer<'info>,
+    #[account(mut, mint::token_program = token_program)]
     pub asset_mint: InterfaceAccount<'info, Mint>,
     #[account(
         init,
@@ -31,6 +37,10 @@ pub struct SubmitListing<'info> {
         bump
     )]
     pub listing: Account<'info, Listing>,
+    /// CHECK: PDA that becomes the mint authority; holds no data.
+    #[account(seeds = [MINT_AUTHORITY_SEED, asset_mint.key().as_ref()], bump)]
+    pub mint_authority: UncheckedAccount<'info>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -53,6 +63,25 @@ pub fn handle_submit_listing(
         mint_authority == Some(issuer),
         ExchangeError::NotMintAuthority
     );
+    // Every unit in circulation must come from an approved batch (invariant 11).
+    require!(
+        ctx.accounts.asset_mint.supply == 0,
+        ExchangeError::NonZeroSupply
+    );
+
+    // Hand the mint authority to the program, signed by the issuer while it
+    // still holds it. No instruction ever moves it again.
+    set_authority(
+        CpiContext::new(
+            ctx.accounts.token_program.key(),
+            SetAuthority {
+                current_authority: ctx.accounts.issuer.to_account_info(),
+                account_or_mint: ctx.accounts.asset_mint.to_account_info(),
+            },
+        ),
+        AuthorityType::MintTokens,
+        Some(ctx.accounts.mint_authority.key()),
+    )?;
 
     let asset_mint = ctx.accounts.asset_mint.key();
     ctx.accounts.listing.set_inner(Listing {
@@ -63,6 +92,9 @@ pub fn handle_submit_listing(
         cashback_eligible: asset_class.cashback_eligible(),
         doc_hash,
         approved_at: 0,
+        next_batch_no: 1,
+        issued: 0,
+        burned: 0,
         bump: ctx.bumps.listing,
     });
     emit_cpi!(ListingSubmitted {
@@ -139,6 +171,10 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         cashback_eligible: asset_class.cashback_eligible(),
         doc_hash: [0u8; 32],
         approved_at: now,
+        // Not issued through Niara: no batches, no issuance accounting.
+        next_batch_no: 0,
+        issued: 0,
+        burned: 0,
         bump: ctx.bumps.listing,
     };
     ctx.accounts.listing.set_inner(listing.clone());

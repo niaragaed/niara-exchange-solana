@@ -343,10 +343,16 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   changes, pause/unpause, both withdrawals (incl. overdraws and wrong signers),
   timelocked fee/cashback changes with out-of-range values, re-delegations,
   `init_cashback_ledger`, donations straight into the fee vaults and
-  `sweep_excess` (incl. wrong signers and empty sweeps). Invariants 1, 2, 3, 4,
-  5, 8, 9 and 10 are checked after every step (4 as `vault == unwithdrawn +
-  unswept donations`, so strict equality after every sweep), and the fee
-  ledgers are cross-checked against the sum of `Settled` events. `PROPTEST_CASES`
+  `sweep_excess` (incl. wrong signers and empty sweeps), and issuance on the
+  four issuer listings: `request_issuance` (incl. zero amounts, wrong
+  signers, suspended/delisted listings), `approve_issuance`/`reject_issuance`
+  of the oldest open batch (incl. wrong signers, non-`Approved` listings,
+  paused protocol) and `burn_with_reason` (incl. overdraws). Invariants 1, 2,
+  3, 4, 5, 8, 9, 10 and 11 are checked after every step (4 as `vault ==
+  unwithdrawn + unswept donations`, so strict equality after every sweep; 11
+  also checks the mint authority is still the program PDA), the fee ledgers
+  are cross-checked against the sum of `Settled` events, and
+  `issued`/`burned` against `IssuanceExecuted`/`TokensBurned`. `PROPTEST_CASES`
   sets the number of sequences (default 48). A mutation check (cashback
   under-recorded in the `FeeLedger`) made it fail and shrink to a minimal
   sequence. Invariants 6 and 7 come with the escrow (week 3).

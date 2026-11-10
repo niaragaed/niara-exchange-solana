@@ -183,6 +183,15 @@ pub struct Listing {
     pub doc_hash: [u8; 32],
     /// Unix timestamp of the latest approval; 0 until approved.
     pub approved_at: i64,
+    /// Number of the next issuance batch (batches are numbered from 1).
+    /// 0 for `Currency` listings, which have no issuance.
+    pub next_batch_no: u64,
+    /// Sum of executed issuance batches.
+    pub issued: u64,
+    /// Sum of burns through `burn_with_reason`. Invariant 11:
+    /// `supply == issued - burned` (on-chain `<=`: holders can also burn
+    /// directly through the token program).
+    pub burned: u64,
     pub bump: u8,
 }
 
@@ -269,6 +278,40 @@ impl FeeLedger {
             .and_then(|v| v.checked_sub(self.cashback_withdrawn))
             .ok_or_else(|| error!(ExchangeError::MathOverflow))
     }
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+pub enum BatchStatus {
+    Requested,
+    Executed,
+    Rejected,
+}
+
+/// One requested increase of supply (spec §3.12). PDA:
+/// `["batch", listing, batch_no (u64 LE)]`. Never closed: it is the on-chain
+/// issuance record.
+#[account]
+#[derive(InitSpace, Debug)]
+pub struct IssuanceBatch {
+    pub listing: Pubkey,
+    pub batch_no: u64,
+    pub amount: u64,
+    /// Wallet that receives the tokens: the holder of record.
+    pub recipient: Pubkey,
+    /// Hash of the document authorizing the batch, registered in Niara-Register.
+    pub doc_hash: [u8; 32],
+    pub status: BatchStatus,
+    pub requested_at: i64,
+    /// When approved or rejected; 0 while `Requested`.
+    pub resolved_at: i64,
+    pub bump: u8,
+}
+
+/// Why a holder burned tokens (`burn_with_reason`).
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+pub enum BurnReason {
+    Redemption,
+    Cancellation,
 }
 
 /// Replay guard for one settled match. PDA: `["settled", order_id]`.

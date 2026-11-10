@@ -43,3 +43,12 @@ pub const CASHBACK_SEED: &[u8] = b"cashback";
 /// Per settled match: `["settled", order_id]` replay guard.
 #[constant]
 pub const SETTLED_SEED: &[u8] = b"settled";
+
+/// Per asset mint: `["mint_authority", asset_mint]`, the mint authority of
+/// every issuer-listed asset after `submit_listing`. Holds no data.
+#[constant]
+pub const MINT_AUTHORITY_SEED: &[u8] = b"mint_authority";
+
+/// Per issuance batch: `["batch", listing, batch_no (u64 LE)]`.
+#[constant]
+pub const BATCH_SEED: &[u8] = b"batch";

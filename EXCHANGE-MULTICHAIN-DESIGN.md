@@ -13,9 +13,12 @@ Roadmap only (not in v1): Robinhood Chain Testnet, HyperEVM Testnet, Tempo Testn
 
 A peer-to-peer tokenized securities exchange with **self-custody** and **curated listing**:
 
-1. **Direct issuance.** An issuer creates its asset token from its own wallet
-   (equity, fixed income or credit). The token *is* the instrument — native
-   issuance, not a wrapper of an asset held by a custodian.
+1. **Direct issuance, Niara-approved.** An issuer creates its asset token from
+   its own wallet (equity, fixed income or credit). The token *is* the
+   instrument — native issuance, not a wrapper of an asset held by a custodian.
+   When the issuer submits the listing, the mint authority moves to the
+   program; from then on every new unit is a numbered batch the issuer
+   requests and Niara approves (§3.12). Neither can mint alone.
 2. **Curated listing.** A token only becomes tradable on Niara after Niara approves
    its listing. Niara controls *eligibility*, never custody.
 3. **Two trading modes, fixed by asset class** (decided 2026-10-22). This mirrors
@@ -115,7 +118,9 @@ interface SettlementAdapter {
 |---|---|---|
 | `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
-| `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `bump` |
+| `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `bump` |
+| `IssuanceBatch` | `["batch", listing, batch_no]` (`batch_no` as `u64` LE) | `listing`, `batch_no`, `amount`, `recipient` (wallet), `doc_hash`, `status` (`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`. Never closed: the on-chain issuance record (§3.12) |
+| Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
 | `CashbackLedger` | `["cashback", listing, payment_mint]` | `listing`, `payment_mint`, `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` (cashback-eligible listing × `Approved` `Currency`), never lazily inside `settle` |
 | `FeeLedger` | `["fees", payment_mint]` | `payment_mint`, `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. Created by `list_currency` with the fee vault. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
 | `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
@@ -129,7 +134,10 @@ interface SettlementAdapter {
 | Instruction | Signer | Effect |
 |---|---|---|
 | `initialize_config` | admin | create `Config` |
-| `submit_listing(asset_class, doc_hash)` | issuer | create `Listing{Pending}` for `Equity`/`FixedIncome`/`Credit`; require `issuer == asset_mint.mint_authority` |
+| `submit_listing(asset_class, doc_hash)` | issuer | create `Listing{Pending}` for `Equity`/`FixedIncome`/`Credit`; require `issuer == asset_mint.mint_authority` and `supply == 0`; in the same instruction move the mint authority to the `["mint_authority", asset_mint]` PDA (`set_authority` CPI signed by the issuer) (§3.12) |
+| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending` or `Approved`: create the next `IssuanceBatch{Requested}` (§3.12) |
+| `approve_issuance` / `reject_issuance` | listing_authority | approve: listing `Approved`, mint the batch to the recipient via the PDA, emit `IssuanceExecuted`; reject: close the request without minting (§3.12) |
+| `burn_with_reason(amount, reason, reference)` | holder | burn own tokens of an issuer-listed asset with reason `Redemption`/`Cancellation`, emit `TokensBurned` (§3.12) |
 | `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false` |
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, payment mint) before its first settlement |
@@ -148,12 +156,15 @@ interface SettlementAdapter {
 own accounting, but never stops a user from taking back their own escrowed
 deposit. While `paused`:
 - **blocked:** `settle`, `open_deal`, `accept_deal`, `withdraw_cashback`,
-  `withdraw_protocol_fees`, `sweep_excess`. If the incident is an accounting bug (e.g.
-  over-credited cashback), withdrawals are exactly the drain path.
+  `withdraw_protocol_fees`, `sweep_excess`, `approve_issuance`. If the
+  incident is an accounting bug (e.g. over-credited cashback), withdrawals are
+  exactly the drain path; minting is the highest-impact action there is.
 - **always allowed:** `cancel_deal` and `expire_deal` (a user reclaims their own
-  deposit, which the protocol's accounting does not decide), listing actions
-  (`submit_listing`, `list_currency`, `approve_listing`, `suspend_listing`,
-  `delist`), `init_cashback_ledger`, and admin/timelock actions.
+  deposit, which the protocol's accounting does not decide), `burn_with_reason`
+  (a holder destroys its own tokens), listing actions (`submit_listing`,
+  `list_currency`, `approve_listing`, `suspend_listing`, `delist`),
+  `request_issuance` and `reject_issuance` (neither mints),
+  `init_cashback_ledger`, and admin/timelock actions.
 
 Listing status gates trading, not payouts: accrued cashback and protocol fees
 stay withdrawable after the asset is delisted or the currency is suspended.
@@ -363,6 +374,11 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   9. a `Currency` listing never accrues cashback
   10. `settle` and the escrow instructions only accept a payment mint that has an
       `Approved` `Currency` listing
+  11. issuance: `asset_mint.supply == listing.issued − listing.burned`, i.e.
+      Σ executed batches − Σ `burn_with_reason`. A holder can still burn
+      directly through the token program, so on-chain this is `≤` (§3.12);
+      tests and fuzzing have no direct burns and check `==`. No batch executes
+      unless the listing is `Approved` and the protocol is not paused
 
 ### 3.10 Out of v1 scope (state it, don't fake it)
 
@@ -394,6 +410,74 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 | Rust | **1.99.1** | `anchor-lang` MSRV is 1.89 |
 | Tests | **LiteSVM** (Rust) | Anchor 1.x default template |
 | TypeScript client | **`@anchor-lang/core`** 1.2.x | replaces `@coral-xyz/anchor` |
+
+### 3.12 Niara-approved issuance
+
+Native issuance (§1) means the token *is* the instrument, so whoever can mint
+can create securities. In v1 neither the issuer nor Niara can mint alone: the
+issuer proposes, Niara approves, and only the program executes.
+
+**Mint authority hand-over.** `submit_listing` requires `supply == 0` and, in
+the same instruction, moves the mint authority from the issuer to the program
+PDA `["mint_authority", asset_mint]` with a `set_authority` CPI signed by the
+issuer (who is still the mint authority at that point). From then on nobody can
+mint outside the program: the issuer's own `MintTo` fails with the token
+program's `OwnerMismatch`, and no instruction of the program ever moves the
+authority again. Consequences, stated rather than hidden:
+- The issuer must finish any mint setup that needs the mint authority (e.g.
+  initializing `TokenMetadata`) before submitting.
+- The hand-over is permanent. A listing rejected while `Pending` (delisted)
+  leaves an empty mint nobody can use; the issuer creates a new mint. A
+  delisted asset keeps its supply (holders can still burn) but never grows.
+- Freeze authority is already `None` for asset mints (§3.8), so the mint
+  authority is the only authority left on the mint.
+
+**Batches.** Every increase of supply is a numbered `IssuanceBatch`
+(`["batch", listing, batch_no]`, `batch_no` as `u64` little-endian):
+
+| Instruction | Signer | Effect |
+|---|---|---|
+| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending` or `Approved`; `amount > 0`, non-empty `doc_hash`, `recipient` not the default key. Creates batch `listing.next_batch_no` (`Requested`) and increments the counter. Mints nothing. Emits `IssuanceRequested` |
+| `approve_issuance` | `listing_authority` | batch `Requested` and listing `Approved`; blocked while paused. Mints `amount` to a token account of the asset mint owned by `recipient` (`mint_to_checked`, signed by the mint-authority PDA); `listing.issued += amount`; batch `Executed`. Emits `IssuanceExecuted { asset_mint, batch_no, amount, recipient, doc_hash, destination }` |
+| `reject_issuance` | `listing_authority` | batch `Requested` → `Rejected`; mints nothing. Any listing status, not blocked by pause. Emits `IssuanceRejected` |
+| `burn_with_reason(amount, reason, reference)` | holder (token account owner) | non-`Currency` listing, any status; `amount > 0`, non-empty `reference`; `burn_checked` from the holder's account; `listing.burned += amount`. `reason`: `Redemption` \| `Cancellation`. Emits `TokensBurned { asset_mint, holder, holder_account, amount, reason, reference }` |
+
+- Batch numbers start at 1 and are sequential per listing: the batch PDA is
+  derived from `listing.next_batch_no`, so a number can be neither skipped nor
+  reused. Requested, executed and rejected batches stay on-chain as the
+  issuance record (rent paid by the issuer, never closed).
+- `doc_hash` is the hash of the document that authorizes the batch (e.g. the
+  corporate act approving a capital increase or a debenture series), registered
+  in Niara-Register; `reference` plays the same role for a burn.
+- Batches may be requested while the listing is `Pending` (the initial
+  offering can be prepared before approval) but execute only once it is
+  `Approved`. A `Suspended` listing keeps its requests; they execute after
+  reinstatement or are rejected.
+- Pause: `approve_issuance` is blocked (minting is the highest-impact action
+  there is); `request_issuance`, `reject_issuance` and `burn_with_reason` are
+  allowed (none pays out on the protocol's accounting; a burn only destroys
+  the holder's own tokens).
+- `Currency` listings have no issuer that can sign and their mint authority is
+  not the program's, so they have no issuance; `burn_with_reason` rejects them
+  (`CurrencyNotIssued`).
+
+**State.** `Listing` gains `next_batch_no: u64` (1 after `submit_listing`, 0 for
+`Currency`), `issued: u64` (Σ executed batches) and `burned: u64` (Σ
+`burn_with_reason`). `IssuanceBatch`: `listing`, `batch_no`, `amount`,
+`recipient` (wallet, the holder of record), `doc_hash`, `status`
+(`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`.
+
+**Invariant 11.** `asset_mint.supply == listing.issued − listing.burned`.
+Limit: SPL Token and Token-2022 both let an owner burn its own tokens directly,
+which the program can neither block nor observe. On-chain the invariant is
+therefore `supply ≤ issued − burned`, with equality while every burn goes
+through `burn_with_reason`. A gap is an unexplained burn: the Register flags a
+supply decrease with no matching `TokensBurned`. Tests check equality (and one
+test shows the gap a direct burn opens).
+
+**Test fixtures.** Trading tests write token balances directly into accounts
+(no mint), so their asset mints have balances without supply. Invariant 11 is
+checked only on assets issued through batches.
 
 ---
 
@@ -443,11 +527,13 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
 
 - Wallets: wagmi v3 (EVM) + Solana Wallet Standard (Phantom, Solflare, Backpack).
 - New real flow (separate from the simulated `/trade`):
-  issue token → submit listing → (admin) approve → place order → match → settle →
-  issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
+  create mint → submit listing (mint authority moves to the program) → (admin)
+  approve listing → issuer requests an issuance batch → (admin) approve batch →
+  place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
-- **Niara-Register:** extend the indexer to capture `ListingApproved` and
-  `Settled` on all three chains into the "Global registry" area (today empty
+- **Niara-Register:** extend the indexer to capture `ListingApproved`,
+  `Settled`, `IssuanceExecuted` and `TokensBurned` (Solana; the EVM side
+  follows when it gains issuance) on all three chains into the "Global registry" area (today empty
   because the Exchange has not operated for real). There is **no separate
   `CashbackCredited` event**: `Settled` carries `fee` and `cashback`, so the
   indexer credits the issuer's cashback from `Settled` (one event per

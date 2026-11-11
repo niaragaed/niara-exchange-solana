@@ -39,6 +39,9 @@ from `target/deploy`, and the script fails instead of leaving a stale binary.
   file names; still review `git status` before every commit.
 - **No devnet (or any network) deploy** and no `git push` without an explicit
   request in the current conversation.
+- **Never use `git checkout`, `git restore` or `git reset` on uncommitted
+  work**: they discard it with no way back. Commit it or `git stash` it
+  first.
 - **Every instruction needs tests**: the success path, every authorization
   check, every `require!`/constraint failure, and its pause behavior. New
   accounting must also be covered by the invariant fuzzer

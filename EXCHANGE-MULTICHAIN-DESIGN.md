@@ -459,19 +459,22 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   Re-evaluate if that changes.
 - Implemented (week 2): `tests/test_invariants.rs` builds a world with two
   `Equity` listings (SPL Token, Token-2022), one `FixedIncome`, one `Credit`
-  and two `Currency` listings, plus a delegated buyer/seller pair for every
+  and three `Currency` listings (USD, the fee mint, under a token program
+  drawn per case; BRL; EUR), plus a delegated buyer/seller pair for every
   asset × payment combination (including invalid ones), then runs random
   sequences of `settle` (valid and invalid markets, zero amounts, replayed
   ids, wrong signer, fills that leave the seller nothing), listing status
   changes, pause/unpause, both withdrawals (incl. overdraws and wrong signers),
   timelocked fee/cashback changes with out-of-range values, re-delegations,
-  `init_cashback_ledger`, donations straight into the fee vaults and
-  `sweep_excess` (incl. wrong signers and empty sweeps), and issuance on the
+  `init_cashback_ledger`, donations straight into the fee vault and
+  `sweep_excess` (incl. wrong signers and empty sweeps; withdrawals and
+  sweeps are also aimed at BRL/EUR, which have no fee vault and must always
+  fail), and issuance on the
   four issuer listings: `request_issuance` (incl. zero amounts, wrong
   signers, suspended/delisted listings), `approve_issuance`/`reject_issuance`
   of the oldest open batch (incl. wrong signers, non-`Approved` listings,
   paused protocol) and `burn_with_reason` (incl. overdraws). Invariants 1 to
-  11 are checked after every step (4 as `vault ==
+  12 are checked after every step (4 as `vault ==
   unwithdrawn + unswept donations`, so strict equality after every sweep; 11
   also checks the mint authority is still the program PDA), the fee ledgers
   are cross-checked against the sum of `Settled` events, and
@@ -479,13 +482,17 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   sets the number of sequences (default 48). A mutation check (cashback
   under-recorded in the `FeeLedger`) made it fail and shrink to a minimal
   sequence.
-- Escrow (week 3): `tests/test_deal.rs` covers every class × side × token
-  program combination, the expiry boundary, replays, pause and listing status
+- Escrow (week 3): `tests/test_deal.rs` covers every market (bond, credit
+  and BRL paid in USDT; USDT sold for BRL) × side × token program
+  combination, the expiry boundary, replays, pause and listing status
   (blocking open/accept, never cancel/expire), every authorization and
-  account check, and tokens sent straight into a deal vault. The invariant
+  account check, deals without a USDT leg, and tokens sent straight into a
+  deal vault. The invariant
   fuzzer mixes random deals into the sequences above: one proposer /
-  counterparty pair per P2P pair (six valid markets, including both
-  `Currency` directions, and five invalid ones: `Equity` asset, `Equity` or
+  counterparty pair per P2P pair (six valid markets: bond and credit paid in
+  USD, and BRL/EUR against USD in both directions, so the fee sits on the
+  payment leg or on the asset leg; and nine invalid ones: no USD leg
+  (bond/credit paid in BRL/EUR, BRL ↔ EUR), `Equity` asset, `Equity` or
   `FixedIncome` payment, same mint), `open_deal` with zero amounts, reused
   ids and expiries in and out of the 30-day window, then `accept_deal`,
   `cancel_deal` and `expire_deal` on tracked deals (wrong signers, a crank
@@ -500,6 +507,11 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   `Settled`. A deterministic test accepts, cancels and expires one deal per
   valid pair and side. Mutation check: refunding the deposit without the
   donated excess in the model made both tests fail and shrink.
+- Fee mint (USDT): `tests/test_fee_ledger.rs` covers `init_fee_vault`
+  (permissionless, once, only for `Config.fee_mint`, mint policy first,
+  pre-funded address, while paused), one ledger for every listing and both
+  modes, and a timelocked fee-mint switch (old vault still withdrawable,
+  old-mint deals refund-only, new trades in the new vault).
 - Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):

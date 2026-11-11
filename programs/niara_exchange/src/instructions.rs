@@ -1,6 +1,7 @@
 pub mod cashback;
 pub mod config;
 pub mod deal;
+pub mod fee_vault;
 pub mod issuance;
 pub mod listing;
 pub mod pause;
@@ -11,6 +12,7 @@ pub mod withdraw;
 pub use cashback::*;
 pub use config::*;
 pub use deal::*;
+pub use fee_vault::*;
 pub use issuance::*;
 pub use listing::*;
 pub use pause::*;

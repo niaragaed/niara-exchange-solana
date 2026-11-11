@@ -124,6 +124,11 @@ pub mod niara_exchange {
 
     // ---- Order-book settlement and cashback ------------------------------
 
+    /// Creates the fee vault and fee ledger of `Config.fee_mint` (USDT).
+    pub fn init_fee_vault(ctx: Context<InitFeeVault>) -> Result<()> {
+        instructions::fee_vault::handle_init_fee_vault(ctx)
+    }
+
     pub fn init_cashback_ledger(ctx: Context<InitCashbackLedger>) -> Result<()> {
         instructions::cashback::handle_init_cashback_ledger(ctx)
     }

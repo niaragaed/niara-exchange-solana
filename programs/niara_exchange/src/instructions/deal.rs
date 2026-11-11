@@ -6,6 +6,10 @@
 //! legs, charges the fee, accrues cashback and closes the vault. Both parties
 //! sign their own transaction, so no operator is involved.
 //!
+//! Fees are always in USDT (`Config.fee_mint`, spec §3.4): one leg of every
+//! deal is in the fee mint (the payment for `FixedIncome`/`Credit`, either one
+//! for `Currency`), and whoever receives that leg pays the fee out of it.
+//!
 //! Pause principle (spec §3.3): a pause, or a listing that is no longer
 //! `Approved`, blocks `open_deal` and `accept_deal` but never `cancel_deal` or
 //! `expire_deal`: a proposer can always take back its own deposit.
@@ -26,7 +30,7 @@ use crate::{
     constants::*,
     error::ExchangeError,
     events::{DealCancelled, DealExecuted, DealExpired, DealOpened},
-    math::split_payment,
+    math::{split_payment, PaymentSplit},
     mint_policy::{require_allowed_mint_extensions, require_no_freeze_authority},
     state::*,
     token_vault::{create_pda_token_account, PdaTokenAccount},
@@ -115,15 +119,20 @@ pub fn handle_open_deal(
         &accounts.asset_mint,
         &accounts.payment_mint,
     )?;
+    let fee_leg = accounts.config.fee_leg(
+        accounts.asset_listing.asset_class,
+        &accounts.asset_mint.key(),
+        &accounts.payment_mint.key(),
+    )?;
     // Fail early on a deal that could not execute at the current fee
     // (`accept_deal` re-checks with the fee in force then).
-    let split = split_payment(
+    fee_split(
+        fee_leg,
+        terms.asset_amount,
         terms.payment_amount,
-        accounts.config.fee_bps,
-        accounts.config.cashback_bps,
+        &accounts.config,
         accounts.asset_listing.cashback_eligible,
     )?;
-    require!(split.seller_receives > 0, ExchangeError::ZeroSellerProceeds);
 
     let (deposit_mint, deposit_program, deposit_amount) = match terms.proposer_side {
         DealSide::Sell => (
@@ -268,25 +277,26 @@ pub struct AcceptDeal<'info> {
     #[account(mut, token::authority = proposer)]
     pub proposer_proceeds_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
+    /// Ledger and vault of the fee mint (USDT). The handler requires one leg
+    /// of the deal to be that mint; the vault was created with it.
     #[account(
         mut,
-        seeds = [FEE_LEDGER_SEED, payment_mint.key().as_ref()],
+        seeds = [FEE_LEDGER_SEED, config.fee_mint.as_ref()],
         bump = fee_ledger.bump
     )]
     pub fee_ledger: Box<Account<'info, FeeLedger>>,
     #[account(
         mut,
-        seeds = [FEE_VAULT_SEED, payment_mint.key().as_ref()],
-        bump = fee_ledger.vault_bump,
-        token::mint = payment_mint,
-        token::token_program = payment_token_program
+        seeds = [FEE_VAULT_SEED, config.fee_mint.as_ref()],
+        bump = fee_ledger.vault_bump
     )]
     pub fee_vault: Box<InterfaceAccount<'info, TokenAccount>>,
     /// Required when the asset listing is cashback-eligible; `None` for
-    /// `Currency` assets, which never accrue cashback.
+    /// `Currency` assets, which never accrue cashback. Cashback is in the fee
+    /// mint, which is then the payment mint.
     #[account(
         mut,
-        seeds = [CASHBACK_SEED, asset_listing.key().as_ref(), payment_mint.key().as_ref()],
+        seeds = [CASHBACK_SEED, asset_listing.key().as_ref(), config.fee_mint.as_ref()],
         bump = cashback_ledger.bump
     )]
     pub cashback_ledger: Option<Account<'info, CashbackLedger>>,
@@ -316,28 +326,49 @@ pub fn handle_accept_deal(ctx: Context<AcceptDeal>) -> Result<()> {
         ExchangeError::MissingCashbackLedger
     );
 
-    let split = split_payment(
+    // Re-checked against the fee mint in force: after a fee-mint switch, a
+    // deal in the old one can only be refunded (spec §3.4).
+    let fee_leg = accounts.config.fee_leg(
+        asset_listing.asset_class,
+        &accounts.asset_mint.key(),
+        &accounts.payment_mint.key(),
+    )?;
+    let split = fee_split(
+        fee_leg,
+        deal.asset_amount,
         deal.payment_amount,
-        accounts.config.fee_bps,
-        accounts.config.cashback_bps,
+        &accounts.config,
         asset_listing.cashback_eligible,
     )?;
-    require!(split.seller_receives > 0, ExchangeError::ZeroSellerProceeds);
 
-    let asset_program = accounts.asset_token_program.key();
-    let payment_program = accounts.payment_token_program.key();
-    let (proceeds_mint, proceeds_program) = match deal.proposer_side {
-        DealSide::Sell => (accounts.payment_mint.key(), payment_program),
-        DealSide::Buy => (accounts.asset_mint.key(), asset_program),
+    let asset_leg = Leg {
+        mint: &accounts.asset_mint,
+        token_program: accounts.asset_token_program.key(),
+        counterparty_account: accounts.counterparty_asset_account.to_account_info(),
+        amount: deal.asset_amount,
+        fee: if fee_leg == FeeLeg::Asset { split.fee } else { 0 },
+    };
+    let payment_leg = Leg {
+        mint: &accounts.payment_mint,
+        token_program: accounts.payment_token_program.key(),
+        counterparty_account: accounts.counterparty_payment_account.to_account_info(),
+        amount: deal.payment_amount,
+        fee: if fee_leg == FeeLeg::Payment { split.fee } else { 0 },
+    };
+    // The proposer escrowed one leg; the counterparty delivers the other.
+    let (escrowed, delivered) = match deal.proposer_side {
+        DealSide::Sell => (asset_leg, payment_leg),
+        DealSide::Buy => (payment_leg, asset_leg),
     };
     require_token_account(
         &accounts.proposer_proceeds_account,
-        &proceeds_mint,
-        &proceeds_program,
+        &delivered.mint.key(),
+        &delivered.token_program,
     )?;
 
-    let vault_balance = accounts.deal_vault.amount;
-    let vault_excess = vault_balance
+    let vault_excess = accounts
+        .deal_vault
+        .amount
         .checked_sub(deal.deposit_amount())
         .ok_or(ExchangeError::MathOverflow)?;
 
@@ -348,90 +379,63 @@ pub fn handle_accept_deal(ctx: Context<AcceptDeal>) -> Result<()> {
     let deal_info = accounts.deal.to_account_info();
     let counterparty_info = accounts.counterparty.to_account_info();
     let vault_info = accounts.deal_vault.to_account_info();
+    let fee_vault_info = accounts.fee_vault.to_account_info();
 
-    let deposit_program = match deal.proposer_side {
-        DealSide::Sell => {
-            // 1. Asset (escrowed, with any excess): vault -> counterparty.
-            transfer(
-                asset_program,
-                vault_info.clone(),
-                &accounts.asset_mint,
-                accounts.counterparty_asset_account.to_account_info(),
-                deal_info.clone(),
-                vault_balance,
-                deal_seeds,
-            )?;
-            // 2. Payment: counterparty -> proposer.
-            transfer(
-                payment_program,
-                accounts.counterparty_payment_account.to_account_info(),
-                &accounts.payment_mint,
-                accounts.proposer_proceeds_account.to_account_info(),
-                counterparty_info.clone(),
-                split.seller_receives,
-                &[],
-            )?;
-            // 3. Fee: counterparty -> fee vault.
-            transfer(
-                payment_program,
-                accounts.counterparty_payment_account.to_account_info(),
-                &accounts.payment_mint,
-                accounts.fee_vault.to_account_info(),
-                counterparty_info,
-                split.fee,
-                &[],
-            )?;
-            asset_program
-        }
-        DealSide::Buy => {
-            // 1. Asset: counterparty -> proposer.
-            transfer(
-                asset_program,
-                accounts.counterparty_asset_account.to_account_info(),
-                &accounts.asset_mint,
-                accounts.proposer_proceeds_account.to_account_info(),
-                counterparty_info,
-                deal.asset_amount,
-                &[],
-            )?;
-            // 2. Payment (escrowed, minus the fee, with any excess):
-            //    vault -> counterparty.
-            let to_seller = split
-                .seller_receives
-                .checked_add(vault_excess)
-                .ok_or(ExchangeError::MathOverflow)?;
-            transfer(
-                payment_program,
-                vault_info.clone(),
-                &accounts.payment_mint,
-                accounts.counterparty_payment_account.to_account_info(),
-                deal_info.clone(),
-                to_seller,
-                deal_seeds,
-            )?;
-            // 3. Fee: vault -> fee vault.
-            transfer(
-                payment_program,
-                vault_info.clone(),
-                &accounts.payment_mint,
-                accounts.fee_vault.to_account_info(),
-                deal_info.clone(),
-                split.fee,
-                deal_seeds,
-            )?;
-            payment_program
-        }
-    };
-    // 4. Vault empty: close it, rent back to the proposer.
+    // 1. Escrowed leg: vault -> counterparty (minus the fee if it is the USDT
+    //    leg, plus any excess), then the fee: vault -> fee vault.
+    let to_counterparty = escrowed
+        .net()?
+        .checked_add(vault_excess)
+        .ok_or(ExchangeError::MathOverflow)?;
+    transfer(
+        escrowed.token_program,
+        vault_info.clone(),
+        escrowed.mint,
+        escrowed.counterparty_account.clone(),
+        deal_info.clone(),
+        to_counterparty,
+        deal_seeds,
+    )?;
+    transfer(
+        escrowed.token_program,
+        vault_info.clone(),
+        escrowed.mint,
+        fee_vault_info.clone(),
+        deal_info.clone(),
+        escrowed.fee,
+        deal_seeds,
+    )?;
+    // 2. Delivered leg: counterparty -> proposer (minus the fee if it is the
+    //    USDT leg), then the fee: counterparty -> fee vault.
+    transfer(
+        delivered.token_program,
+        delivered.counterparty_account.clone(),
+        delivered.mint,
+        accounts.proposer_proceeds_account.to_account_info(),
+        counterparty_info.clone(),
+        delivered.net()?,
+        &[],
+    )?;
+    transfer(
+        delivered.token_program,
+        delivered.counterparty_account.clone(),
+        delivered.mint,
+        fee_vault_info,
+        counterparty_info,
+        delivered.fee,
+        &[],
+    )?;
+    // 3. Vault empty: close it, rent back to the proposer.
     close_vault(
-        deposit_program,
+        escrowed.token_program,
         vault_info,
         accounts.proposer.to_account_info(),
         deal_info,
         deal_seeds,
     )?;
+    let fee_mint = accounts.config.fee_mint;
 
-    // 5. Accounting, as in `settle`.
+    // 4. Accounting, as in `settle`.
     ctx.accounts
         .fee_ledger
         .record_fee(split.fee, split.cashback)?;
@@ -455,6 +459,7 @@ pub fn handle_accept_deal(ctx: Context<AcceptDeal>) -> Result<()> {
         proposer_side: deal.proposer_side,
         asset_amount: deal.asset_amount,
         payment_amount: deal.payment_amount,
+        fee_mint,
         fee: split.fee,
         cashback: split.cashback,
         vault_excess,
@@ -644,6 +649,51 @@ fn require_p2p_market(
         require_no_freeze_authority(asset_mint)?;
     }
     Ok(())
+}
+
+/// The fee on the USDT leg (spec §3.4): `fee = ceil(usdt_amount × fee_bps)`,
+/// and the receiver of that leg must still get something
+/// (`ZeroSellerProceeds`). Cashback only for eligible listings, whose USDT
+/// leg is always the payment.
+fn fee_split(
+    fee_leg: FeeLeg,
+    asset_amount: u64,
+    payment_amount: u64,
+    config: &Config,
+    cashback_eligible: bool,
+) -> Result<PaymentSplit> {
+    let usdt_amount = match fee_leg {
+        FeeLeg::Asset => asset_amount,
+        FeeLeg::Payment => payment_amount,
+    };
+    let split = split_payment(
+        usdt_amount,
+        config.fee_bps,
+        config.cashback_bps,
+        cashback_eligible,
+    )?;
+    require!(split.seller_receives > 0, ExchangeError::ZeroSellerProceeds);
+    Ok(split)
+}
+
+/// One leg of a deal at acceptance: `amount` of `mint` changes hands, of
+/// which `fee` (non-zero only on the USDT leg) goes to the fee vault instead
+/// of the receiver.
+struct Leg<'a, 'info> {
+    mint: &'a InterfaceAccount<'info, Mint>,
+    token_program: Pubkey,
+    counterparty_account: AccountInfo<'info>,
+    amount: u64,
+    fee: u64,
+}
+
+impl Leg<'_, '_> {
+    /// What the receiver of this leg gets.
+    fn net(&self) -> Result<u64> {
+        self.amount
+            .checked_sub(self.fee)
+            .ok_or_else(|| error!(ExchangeError::MathOverflow))
+    }
 }
 
 /// For token accounts whose mint depends on the deal side.

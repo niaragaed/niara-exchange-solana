@@ -132,22 +132,31 @@ impl Env {
         (mint, issuer)
     }
 
-    /// An approved listing of `class` traded against a fresh approved
-    /// currency, the cashback ledger when the class is eligible, and two
-    /// funded parties.
+    /// An approved listing of `class` paid in the fee mint (USDT), the
+    /// cashback ledger when the class is eligible, and two funded parties.
+    /// A `Currency` asset is a fresh non-fee currency (BRL -> USDT).
     pub fn p2p(&mut self, class: AssetClass, asset_program: Pubkey, payment_program: Pubkey) -> P2p {
         let (asset_mint, issuer) = if class == AssetClass::Currency {
             (self.listed_currency(asset_program), self.funded_keypair())
         } else {
             self.listed_issuer_asset(asset_program, class)
         };
-        let payment_mint = self.listed_currency(payment_program);
+        let payment_mint = self.fee_currency(payment_program);
         if class.cashback_eligible() {
             let payer = self.admin.insecure_clone();
             self.init_cashback_ledger(&payer, asset_mint, payment_mint)
                 .unwrap();
         }
         self.p2p_parties(asset_mint, payment_mint, issuer)
+    }
+
+    /// A `Currency` deal selling USDT (the fee mint, `asset_mint`) for a fresh
+    /// non-fee currency (`payment_mint`): the fee is on the asset leg.
+    pub fn p2p_selling_usdt(&mut self, asset_program: Pubkey, payment_program: Pubkey) -> P2p {
+        let usdt = self.fee_currency(asset_program);
+        let brl = self.listed_currency(payment_program);
+        let nobody = self.funded_keypair();
+        self.p2p_parties(usdt, brl, nobody)
     }
 
     /// Two new parties for existing listings, each holding `P2P_ASSETS` and
@@ -290,12 +299,13 @@ impl Env {
 
     // ---- accept_deal ---------------------------------------------------------
 
-    /// Accounts for accepting deal `id` of `p` as its counterparty. The
-    /// cashback ledger is passed when it exists.
+    /// Accounts for accepting deal `id` of `p` as its counterparty, with the
+    /// fee ledger and vault of the env's fee mint. The cashback ledger is
+    /// passed when it exists.
     pub fn accept_deal_accounts(&self, p: &P2p, id: [u8; 16]) -> AcceptDealAccounts {
         let deal = p.deal(id);
         let side = self.fetch_deal(&deal).proposer_side;
-        let ledger = cashback_pda(&p.asset_mint, &p.payment_mint);
+        let ledger = cashback_pda(&p.asset_mint, &self.fee_mint);
         AcceptDealAccounts {
             counterparty: p.counterparty.pubkey(),
             asset_mint: p.asset_mint,
@@ -311,8 +321,8 @@ impl Env {
                 DealSide::Sell => p.proposer_payment,
                 DealSide::Buy => p.proposer_asset,
             },
-            fee_ledger: fee_ledger_pda(&p.payment_mint),
-            fee_vault: fee_vault_pda(&p.payment_mint),
+            fee_ledger: fee_ledger_pda(&self.fee_mint),
+            fee_vault: fee_vault_pda(&self.fee_mint),
             cashback_ledger: self.exists(&ledger).then_some(ledger),
             asset_program: p.asset_program,
             payment_program: p.payment_program,

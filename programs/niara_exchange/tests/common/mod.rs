@@ -89,6 +89,10 @@ pub struct Env {
     pub listing_authority: Keypair,
     pub operator: Keypair,
     pub treasury: Keypair,
+    /// `Config.fee_mint` of the default params (USDT). The mint itself is
+    /// created on first use by `fee_currency`, with the token program the
+    /// test asks for.
+    pub fee_mint: Pubkey,
 }
 
 impl Env {
@@ -116,6 +120,7 @@ impl Env {
             listing_authority,
             operator,
             treasury,
+            fee_mint: Pubkey::new_unique(),
         };
         let admin_key = env.admin.pubkey();
         env.set_upgrade_authority(Some(admin_key));
@@ -124,7 +129,15 @@ impl Env {
 
     /// Program deployed and config initialized with the default params.
     pub fn initialized() -> Self {
+        Self::initialized_with_fee_mint(|_| Pubkey::new_unique())
+    }
+
+    /// Like `initialized`, with `Config.fee_mint` set to the mint `make`
+    /// returns (e.g. a Token-2022 mint with extensions, created beforehand).
+    /// `fee_currency` then lists it and creates its fee vault.
+    pub fn initialized_with_fee_mint(make: impl FnOnce(&mut Env) -> Pubkey) -> Self {
         let mut env = Self::deployed();
+        env.fee_mint = make(&mut env);
         let params = env.default_params();
         let admin = env.admin.insecure_clone();
         env.initialize_config(&admin, params).unwrap();
@@ -154,6 +167,7 @@ impl Env {
             listing_authority: self.listing_authority.pubkey(),
             settlement_operator: self.operator.pubkey(),
             treasury: self.treasury.pubkey(),
+            fee_mint: self.fee_mint,
             fee_bps: FEE_BPS,
             cashback_bps: CASHBACK_BPS,
             timelock_secs: TIMELOCK_SECS,
@@ -200,7 +214,16 @@ impl Env {
 
     /// Writes an initialized, extension-free mint owned by `token_program`.
     pub fn create_mint(&mut self, token_program: Pubkey, authority: Option<Pubkey>) -> Pubkey {
-        let mint = Pubkey::new_unique();
+        self.create_mint_at(Pubkey::new_unique(), token_program, authority)
+    }
+
+    /// `create_mint` at a chosen address (e.g. the configured fee mint).
+    pub fn create_mint_at(
+        &mut self,
+        mint: Pubkey,
+        token_program: Pubkey,
+        authority: Option<Pubkey>,
+    ) -> Pubkey {
         let state = Mint {
             mint_authority: authority.map_or(COption::None, COption::Some),
             supply: 0,
@@ -426,9 +449,6 @@ impl Env {
                 config: config_pda(),
                 asset_mint: mint,
                 listing: listing_pda(&mint),
-                vault_authority: vault_authority(),
-                fee_vault: fee_vault_pda(&mint),
-                fee_ledger: fee_ledger_pda(&mint),
                 token_program: self.owner_of(&mint),
                 system_program: system_program::ID,
                 event_authority: event_authority(),
@@ -437,6 +457,25 @@ impl Env {
             instruction::ListCurrency {},
         );
         self.send(&[ix], &[authority])
+    }
+
+    pub fn init_fee_vault(&mut self, payer: &Keypair, mint: Pubkey) -> TransactionResult {
+        let ix = ix(
+            accounts::InitFeeVault {
+                payer: payer.pubkey(),
+                config: config_pda(),
+                fee_mint: mint,
+                vault_authority: vault_authority(),
+                fee_vault: fee_vault_pda(&mint),
+                fee_ledger: fee_ledger_pda(&mint),
+                token_program: self.owner_of(&mint),
+                system_program: system_program::ID,
+                event_authority: event_authority(),
+                program: program_id(),
+            },
+            instruction::InitFeeVault {},
+        );
+        self.send(&[ix], &[payer])
     }
 
     fn status_accounts(&self, authority: &Keypair, mint: &Pubkey) -> accounts::UpdateListingStatus {

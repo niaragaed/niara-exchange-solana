@@ -102,4 +102,6 @@ pub enum ExchangeError {
     CashbackAlreadyFrozen,
     #[msg("Cashback is not frozen for this listing")]
     CashbackNotFrozen,
+    #[msg("The trade needs a leg in the fee mint (USDT)")]
+    NotFeeMint,
 }

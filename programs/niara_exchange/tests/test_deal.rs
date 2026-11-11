@@ -16,8 +16,6 @@ use solana_signer::Signer;
 
 const ASSETS: u64 = 10;
 const PAYMENT: u64 = 25_000_000; // 25.000000 in a 6-decimal currency
-const P2P_CLASSES: [AssetClass; 3] =
-    [AssetClass::FixedIncome, AssetClass::Credit, AssetClass::Currency];
 const SIDES: [DealSide; 2] = [DealSide::Sell, DealSide::Buy];
 const PROGRAMS: [(Pubkey, Pubkey); 4] = [
     (SPL_TOKEN, SPL_TOKEN),
@@ -52,13 +50,13 @@ struct Snapshot {
 
 fn snapshot(env: &Env, p: &P2p, id: [u8; 16]) -> Snapshot {
     let vault = p.vault(id);
-    let ledger = cashback_pda(&p.asset_mint, &p.payment_mint);
+    let ledger = cashback_pda(&p.asset_mint, &env.fee_mint);
     Snapshot {
         proposer_asset: env.balance(&p.proposer_asset),
         proposer_payment: env.balance(&p.proposer_payment),
         counterparty_asset: env.balance(&p.counterparty_asset),
         counterparty_payment: env.balance(&p.counterparty_payment),
-        fee_vault: env.balance(&fee_vault_pda(&p.payment_mint)),
+        fee_vault: env.balance(&fee_vault_pda(&env.fee_mint)),
         deal_vault: if env.exists(&vault) { env.balance(&vault) } else { 0 },
         cashback: if env.exists(&ledger) {
             env.fetch::<CashbackLedger>(&ledger).accrued
@@ -107,29 +105,67 @@ fn assert_untouched(env: &Env, p: &P2p, id: [u8; 16], before: Snapshot, status: 
 
 // ---- success paths ----------------------------------------------------------
 
-fn assert_opens_and_executes(
-    class: AssetClass,
-    asset_program: Pubkey,
-    payment_program: Pubkey,
-    side: DealSide,
-) {
+/// The P2P markets: issuer assets and BRL paid in USDT (fee on the payment
+/// leg), and USDT sold for BRL (fee on the asset leg).
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    PaidInUsdt(AssetClass),
+    SellingUsdt,
+}
+
+const KINDS: [Kind; 4] = [
+    Kind::PaidInUsdt(AssetClass::FixedIncome),
+    Kind::PaidInUsdt(AssetClass::Credit),
+    Kind::PaidInUsdt(AssetClass::Currency),
+    Kind::SellingUsdt,
+];
+
+impl Kind {
+    fn build(self, env: &mut Env, asset_program: Pubkey, payment_program: Pubkey) -> P2p {
+        match self {
+            Kind::PaidInUsdt(class) => env.p2p(class, asset_program, payment_program),
+            Kind::SellingUsdt => env.p2p_selling_usdt(asset_program, payment_program),
+        }
+    }
+
+    fn class(self) -> AssetClass {
+        match self {
+            Kind::PaidInUsdt(class) => class,
+            Kind::SellingUsdt => AssetClass::Currency,
+        }
+    }
+
+    /// (asset_amount, payment_amount): 0.5 USDT for 2.7 BRL when USDT is sold.
+    fn amounts(self) -> (u64, u64) {
+        match self {
+            Kind::PaidInUsdt(_) => (ASSETS, PAYMENT),
+            Kind::SellingUsdt => (500_000, 2_700_000),
+        }
+    }
+}
+
+fn assert_opens_and_executes(kind: Kind, asset_program: Pubkey, payment_program: Pubkey, side: DealSide) {
     let mut env = Env::initialized();
-    let p = env.p2p(class, asset_program, payment_program);
+    let p = kind.build(&mut env, asset_program, payment_program);
+    let class = kind.class();
+    let (asset_amount, payment_amount) = kind.amounts();
     let id = deal_id(1);
     let start = snapshot(&env, &p, id);
     let expires_at = env.now() + DEAL_TTL;
 
     // open_deal: only the proposer's side moves, into the vault.
-    let meta = env.open_deal(&p, id, side, ASSETS, PAYMENT).unwrap();
+    let meta = env
+        .open_deal(&p, id, side, asset_amount, payment_amount)
+        .unwrap();
     let opened = snapshot(&env, &p, id);
     let (deposit, deposit_mint, deposit_program) = match side {
-        DealSide::Sell => (ASSETS, p.asset_mint, asset_program),
-        DealSide::Buy => (PAYMENT, p.payment_mint, payment_program),
+        DealSide::Sell => (asset_amount, p.asset_mint, asset_program),
+        DealSide::Buy => (payment_amount, p.payment_mint, payment_program),
     };
     let mut expected = start;
     match side {
-        DealSide::Sell => expected.proposer_asset -= ASSETS,
-        DealSide::Buy => expected.proposer_payment -= PAYMENT,
+        DealSide::Sell => expected.proposer_asset -= asset_amount,
+        DealSide::Buy => expected.proposer_payment -= payment_amount,
     }
     expected.deal_vault = deposit;
     assert_eq!(opened, expected);
@@ -140,7 +176,7 @@ fn assert_opens_and_executes(
     assert_eq!(deal.proposer, p.proposer.pubkey());
     assert_eq!(deal.counterparty, p.counterparty.pubkey());
     assert_eq!((deal.asset_mint, deal.payment_mint), (p.asset_mint, p.payment_mint));
-    assert_eq!((deal.asset_amount, deal.payment_amount), (ASSETS, PAYMENT));
+    assert_eq!((deal.asset_amount, deal.payment_amount), (asset_amount, payment_amount));
     assert_eq!(deal.proposer_side, side);
     assert_eq!(deal.expires_at, expires_at);
     assert_eq!(deal.status, DealStatus::Open);
@@ -155,7 +191,10 @@ fn assert_opens_and_executes(
     assert_eq!((e.deal, e.deal_id, e.proposer), (deal_key, id, p.proposer.pubkey()));
     assert_eq!(e.counterparty, p.counterparty.pubkey());
     assert_eq!((e.asset_mint, e.payment_mint), (p.asset_mint, p.payment_mint));
-    assert_eq!((e.proposer_side, e.asset_amount, e.payment_amount), (side, ASSETS, PAYMENT));
+    assert_eq!(
+        (e.proposer_side, e.asset_amount, e.payment_amount),
+        (side, asset_amount, payment_amount)
+    );
     assert_eq!(e.expires_at, expires_at);
 
     // accept_deal: both legs, the fee and the cashback in one instruction.
@@ -164,37 +203,48 @@ fn assert_opens_and_executes(
     let meta = env.accept_deal(&p, id).unwrap();
     let after = snapshot(&env, &p, id);
 
-    let fee = expected_fee(PAYMENT, FEE_BPS);
+    // The fee is on the USDT leg; whoever receives that leg pays it, and the
+    // other leg moves in full (invariant 12).
+    let usdt_is_asset = p.asset_mint == env.fee_mint;
+    assert_eq!(usdt_is_asset, matches!(kind, Kind::SellingUsdt));
+    let usdt_amount = if usdt_is_asset { asset_amount } else { payment_amount };
+    let fee = expected_fee(usdt_amount, FEE_BPS);
     let cashback = expected_cashback(fee, class.cashback_eligible());
-    let seller_receives = PAYMENT - fee;
+    let (asset_fee, payment_fee) = if usdt_is_asset { (fee, 0) } else { (0, fee) };
     let mut expected = opened;
     expected.deal_vault = 0;
     expected.fee_vault += fee;
     expected.cashback += cashback;
     match side {
         DealSide::Sell => {
-            expected.counterparty_asset += ASSETS;
-            expected.counterparty_payment -= PAYMENT;
-            expected.proposer_payment += seller_receives;
+            expected.counterparty_asset += asset_amount - asset_fee;
+            expected.counterparty_payment -= payment_amount;
+            expected.proposer_payment += payment_amount - payment_fee;
         }
         DealSide::Buy => {
-            expected.counterparty_asset -= ASSETS;
-            expected.counterparty_payment += seller_receives;
-            expected.proposer_asset += ASSETS;
+            expected.counterparty_asset -= asset_amount;
+            expected.counterparty_payment += payment_amount - payment_fee;
+            expected.proposer_asset += asset_amount - asset_fee;
         }
     }
     assert_eq!(after, expected);
-    // Invariant 1.
-    assert_eq!(seller_receives + fee, PAYMENT);
+    // Invariant 1, on the USDT leg.
+    assert!(fee > 0 && fee < usdt_amount);
 
-    let ledger = env.fee_ledger(&p.payment_mint);
+    let ledger = env.fee_ledger(&env.fee_mint);
     assert_eq!((ledger.fees_collected, ledger.cashback_accrued), (fee, cashback));
-    env.assert_vault_matches_ledger(&p.payment_mint);
+    env.assert_vault_matches_ledger(&env.fee_mint);
     // Invariant 9: a Currency asset has no cashback ledger at all.
     assert_eq!(
-        env.exists(&cashback_pda(&p.asset_mint, &p.payment_mint)),
+        env.exists(&cashback_pda(&p.asset_mint, &env.fee_mint)),
         class.cashback_eligible()
     );
+    // Invariant 12: the non-USDT currency never gets a fee vault or ledger.
+    for mint in [p.asset_mint, p.payment_mint] {
+        if mint != env.fee_mint {
+            assert!(!env.exists(&fee_vault_pda(&mint)) && !env.exists(&fee_ledger_pda(&mint)));
+        }
+    }
 
     // Vault closed, rent back to the proposer (the counterparty paid the fee).
     assert!(!env.exists(&p.vault(id)));
@@ -208,25 +258,29 @@ fn assert_opens_and_executes(
     assert_eq!((e.deal, e.deal_id, e.proposer), (deal_key, id, p.proposer.pubkey()));
     assert_eq!(e.counterparty, p.counterparty.pubkey());
     assert_eq!((e.asset_mint, e.payment_mint), (p.asset_mint, p.payment_mint));
-    assert_eq!((e.proposer_side, e.asset_amount, e.payment_amount), (side, ASSETS, PAYMENT));
+    assert_eq!(
+        (e.proposer_side, e.asset_amount, e.payment_amount),
+        (side, asset_amount, payment_amount)
+    );
+    assert_eq!(e.fee_mint, env.fee_mint);
     assert_eq!((e.fee, e.cashback, e.vault_excess), (fee, cashback, 0));
 }
 
 #[test]
-fn deals_execute_for_every_class_side_and_token_program() {
-    for class in P2P_CLASSES {
+fn deals_execute_for_every_market_side_and_token_program() {
+    for kind in KINDS {
         for side in SIDES {
             for (asset_program, payment_program) in PROGRAMS {
-                assert_opens_and_executes(class, asset_program, payment_program, side);
+                assert_opens_and_executes(kind, asset_program, payment_program, side);
             }
         }
     }
 }
 
-/// BRL <-> USDT: the currency sold is the asset leg, the fee is charged in the
-/// payment currency and nothing accrues as cashback.
+/// BRL -> USDT: the fee is charged in USDT, on the payment leg, so the BRL
+/// seller pays it; nothing accrues as cashback.
 #[test]
-fn currency_deal_charges_fee_in_payment_mint_without_cashback() {
+fn currency_deal_for_usdt_charges_the_usdt_receiver() {
     let mut env = Env::initialized();
     let p = env.p2p(AssetClass::Currency, SPL_TOKEN, TOKEN_2022);
     env.open_deal(&p, deal_id(1), DealSide::Sell, 500_000, 100_000)
@@ -235,19 +289,68 @@ fn currency_deal_charges_fee_in_payment_mint_without_cashback() {
     assert!(a.cashback_ledger.is_none(), "no ledger can exist for a Currency asset");
     let meta = env.accept_deal(&p, deal_id(1)).unwrap();
     let e = &events::<DealExecuted>(&meta)[0];
-    assert_eq!((e.fee, e.cashback), (expected_fee(100_000, FEE_BPS), 0));
+    let fee = expected_fee(100_000, FEE_BPS);
+    assert_eq!((e.fee_mint, e.fee, e.cashback), (p.payment_mint, fee, 0));
+    // The BRL buyer gets all the BRL; the BRL seller gets USDT minus the fee.
     assert_eq!(env.balance(&p.counterparty_asset), P2P_ASSETS + 500_000);
-    assert_eq!(env.fee_ledger(&p.payment_mint).fees_collected, e.fee);
-    // The asset currency's own fee vault is not involved.
-    assert_eq!(env.fee_ledger(&p.asset_mint).fees_collected, 0);
-    assert_eq!(env.balance(&fee_vault_pda(&p.asset_mint)), 0);
+    assert_eq!(env.balance(&p.proposer_payment), P2P_PAYMENT + 100_000 - fee);
+    assert_eq!(env.fee_ledger(&p.payment_mint).fees_collected, fee);
+    // BRL has no fee vault at all.
+    assert!(!env.exists(&fee_vault_pda(&p.asset_mint)));
+}
+
+/// USDT -> BRL: the currency sold is USDT, so the fee is on the asset leg and
+/// the party buying USDT pays it; the BRL leg moves in full.
+#[test]
+fn currency_deal_selling_usdt_charges_the_usdt_buyer() {
+    for side in SIDES {
+        let mut env = Env::initialized();
+        let p = env.p2p_selling_usdt(SPL_TOKEN, TOKEN_2022);
+        let (usdt, brl) = (500_000, 2_700_000);
+        env.open_deal(&p, deal_id(1), side, usdt, brl).unwrap();
+        let meta = env.accept_deal(&p, deal_id(1)).unwrap();
+        let fee = expected_fee(usdt, FEE_BPS);
+        let e = &events::<DealExecuted>(&meta)[0];
+        assert_eq!((e.fee_mint, e.fee, e.cashback), (p.asset_mint, fee, 0));
+        let (usdt_buyer, brl_seller) = match side {
+            // The proposer sells USDT: the counterparty buys it and pays BRL.
+            DealSide::Sell => (p.counterparty_asset, p.proposer_payment),
+            DealSide::Buy => (p.proposer_asset, p.counterparty_payment),
+        };
+        assert_eq!(env.balance(&usdt_buyer), P2P_ASSETS + usdt - fee);
+        assert_eq!(env.balance(&brl_seller), P2P_PAYMENT + brl);
+        assert_eq!(env.balance(&fee_vault_pda(&p.asset_mint)), fee);
+        assert_eq!(env.fee_ledger(&p.asset_mint).fees_collected, fee);
+        assert!(!env.exists(&fee_vault_pda(&p.payment_mint)));
+    }
+}
+
+/// Fees are only ever charged in USDT: a deal with no USDT leg is rejected
+/// (BRL <-> EUR, a bond paid in BRL), at open and at accept.
+#[test]
+fn deal_needs_a_usdt_leg() {
+    let mut env = Env::initialized();
+    env.fee_currency(SPL_TOKEN);
+    let brl = env.listed_currency(SPL_TOKEN);
+    let eur = env.listed_currency(SPL_TOKEN);
+    let (bond, issuer) = env.listed_issuer_asset(SPL_TOKEN, AssetClass::FixedIncome);
+    for (asset, payment) in [(brl, eur), (eur, brl), (bond, brl)] {
+        let p = env.p2p_parties(asset, payment, issuer.insecure_clone());
+        for side in SIDES {
+            let before = snapshot(&env, &p, deal_id(1));
+            let res = env.open_deal(&p, deal_id(1), side, ASSETS, PAYMENT);
+            assert_custom_err(res, ExchangeError::NotFeeMint);
+            assert_untouched(&env, &p, deal_id(1), before, None);
+        }
+    }
+    assert!(!env.exists(&fee_vault_pda(&brl)) && !env.exists(&fee_vault_pda(&eur)));
 }
 
 /// Allowlisted metadata extensions on both mints do not get in the way.
 #[test]
 fn deal_with_token_2022_metadata_mints() {
-    let mut env = Env::initialized();
     let exts = [ExtensionType::MetadataPointer, ExtensionType::TokenMetadata];
+    let mut env = Env::initialized_with_fee_mint(|env| env.create_mint_2022(None, &exts));
     let issuer = env.funded_keypair();
     let asset_mint = env.create_mint_2022(Some(issuer.pubkey()), &exts);
     env.set_mint_decimals(&asset_mint, ASSET_DECIMALS);
@@ -255,8 +358,7 @@ fn deal_with_token_2022_metadata_mints() {
         .unwrap();
     let authority = env.listing_authority.insecure_clone();
     env.approve(&authority, asset_mint).unwrap();
-    let payment_mint = env.create_mint_2022(None, &exts);
-    env.list_currency(&authority, payment_mint).unwrap();
+    let payment_mint = env.fee_currency(TOKEN_2022);
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
         .unwrap();
@@ -554,7 +656,7 @@ fn pending_asset_listing_cannot_open() {
     let asset_mint = env.create_mint(SPL_TOKEN, Some(issuer.pubkey()));
     env.submit_listing(&issuer, asset_mint, AssetClass::FixedIncome, DOC_HASH)
         .unwrap();
-    let payment_mint = env.listed_currency(SPL_TOKEN);
+    let payment_mint = env.fee_currency(SPL_TOKEN);
     let p = env.p2p_parties(asset_mint, payment_mint, issuer);
     let res = env.open_deal(&p, deal_id(1), DealSide::Sell, ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::ListingNotApproved);
@@ -823,14 +925,11 @@ fn accept_accounts_must_match_the_deal() {
     let res = env.accept_deal_with(&counterparty, &a);
     assert_custom_err(res, ExchangeError::DealAccountMismatch);
 
-    // Another payment currency (with its fee accounts).
+    // Another payment currency.
     let other = env.listed_currency(SPL_TOKEN);
     let mut a = env.accept_deal_accounts(&p, id);
     a.payment_mint = other;
     a.payment_listing = listing_pda(&other);
-    a.fee_ledger = fee_ledger_pda(&other);
-    a.fee_vault = fee_vault_pda(&other);
-    a.cashback_ledger = None;
     a.counterparty_payment =
         env.create_token_account(SPL_TOKEN, other, counterparty.pubkey(), P2P_PAYMENT);
     a.proposer_proceeds = env.create_token_account(SPL_TOKEN, other, p.proposer.pubkey(), 0);
@@ -848,6 +947,13 @@ fn accept_accounts_must_match_the_deal() {
     a.proposer_proceeds = env.create_token_account(SPL_TOKEN, p.payment_mint, counterparty.pubkey(), 0);
     let res = env.accept_deal_with(&counterparty, &a);
     assert_custom_err(res, AnchorError::ConstraintTokenOwner);
+
+    // A fee vault that is not the fee mint's PDA, even owned by the vault
+    // authority and of the right mint.
+    let mut a = env.accept_deal_accounts(&p, id);
+    a.fee_vault = env.create_token_account(SPL_TOKEN, p.payment_mint, vault_authority(), 0);
+    let res = env.accept_deal_with(&counterparty, &a);
+    assert_custom_err(res, AnchorError::ConstraintSeeds);
 
     // Another deal's vault.
     env.open_deal(&p, deal_id(2), DealSide::Sell, ASSETS, PAYMENT)
@@ -867,7 +973,7 @@ fn accept_accounts_must_match_the_deal() {
 fn eligible_listing_needs_its_cashback_ledger() {
     let mut env = Env::initialized();
     let (asset_mint, issuer) = env.listed_issuer_asset(SPL_TOKEN, AssetClass::FixedIncome);
-    let payment_mint = env.listed_currency(SPL_TOKEN);
+    let payment_mint = env.fee_currency(SPL_TOKEN);
     let p = env.p2p_parties(asset_mint, payment_mint, issuer);
     env.open_deal(&p, deal_id(1), DealSide::Sell, ASSETS, PAYMENT)
         .unwrap();

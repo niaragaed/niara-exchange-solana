@@ -1,39 +1,59 @@
-//! Token-2022 extension allowlist (design spec §3.8), enforced by both
-//! `submit_listing` and `list_currency`.
+//! Token-2022 extension allowlist (design spec §3.8), enforced by
+//! `submit_listing`, `list_currency` and `init_fee_vault`.
 
 mod common;
 
+use anchor_lang::prelude::Pubkey;
 use anchor_spl::token_2022::spl_token_2022::extension::ExtensionType;
 use common::*;
 use niara_exchange::{error::ExchangeError, AssetClass, Listing};
+use solana_keypair::Keypair;
 use solana_signer::Signer;
 
-/// Builds a Token-2022 mint with `extensions` and asserts that neither listing
-/// path accepts it. `log_hint` must appear in the program logs, which proves the
+/// An env whose fee mint is a Token-2022 mint with `extensions` (mint
+/// authority `issuer`, funded), built by `make`.
+fn env_with_fee_mint(issuer: &Keypair, make: impl FnOnce(&mut Env, Pubkey) -> Pubkey) -> Env {
+    let issuer_key = issuer.pubkey();
+    let mut env = Env::initialized_with_fee_mint(|env| make(env, issuer_key));
+    env.svm.airdrop(&issuer_key, 10_000_000_000).unwrap();
+    env
+}
+
+/// Builds a Token-2022 mint with `extensions` and asserts that no path
+/// accepts it. `log_hint` must appear in the program logs, which proves the
 /// rejection came from the allowlist rather than from a malformed fixture.
 fn assert_rejected(extensions: &[ExtensionType], log_hint: &str) {
-    let mut env = Env::initialized();
-    let issuer = env.funded_keypair();
+    let issuer = Keypair::new();
+    let mut env = env_with_fee_mint(&issuer, |env, issuer| {
+        env.create_mint_2022(Some(issuer), extensions)
+    });
     let authority = env.listing_authority.insecure_clone();
-    let mint = env.create_mint_2022(Some(issuer.pubkey()), extensions);
+    let mint = env.fee_mint;
     assert_rejected_mint(&mut env, &issuer, &authority, mint, log_hint);
 }
 
-/// Both paths must fail with `UnsupportedMintExtension`. `list_currency` runs
-/// the allowlist before it creates the fee vault, so mints the vault creation
-/// itself would choke on (an unknown extension type Anchor cannot size;
-/// `DefaultAccountState`, under which Token-2022 refuses `InitializeAccount3`)
-/// are still rejected by the policy, with the policy's error.
+/// Every path must fail with `UnsupportedMintExtension`. `init_fee_vault`
+/// runs the allowlist before it creates the fee vault, so mints the vault
+/// creation itself would choke on (an unknown extension type Anchor cannot
+/// size; `DefaultAccountState`, under which Token-2022 refuses
+/// `InitializeAccount3`) are still rejected by the policy, with the policy's
+/// error. `mint` is the configured fee mint, so `init_fee_vault` gets past
+/// its own `NotFeeMint` check.
 fn assert_rejected_mint(
     env: &mut Env,
-    issuer: &solana_keypair::Keypair,
-    authority: &solana_keypair::Keypair,
-    mint: anchor_lang::prelude::Pubkey,
+    issuer: &Keypair,
+    authority: &Keypair,
+    mint: Pubkey,
     log_hint: &str,
 ) {
     let submit = env.submit_listing(issuer, mint, AssetClass::Equity, DOC_HASH);
     let currency = env.list_currency(authority, mint);
-    for (path, res) in [("submit_listing", submit), ("list_currency", currency)] {
+    let fee_vault = env.init_fee_vault(issuer, mint);
+    for (path, res) in [
+        ("submit_listing", submit),
+        ("list_currency", currency),
+        ("init_fee_vault", fee_vault),
+    ] {
         let logs = assert_custom_err(res, ExchangeError::UnsupportedMintExtension);
         assert!(
             logs.iter().any(|l| l.contains(log_hint)),
@@ -68,11 +88,14 @@ rejects!(rejects_mint_close_authority, MintCloseAuthority);
 
 #[test]
 fn rejects_unknown_extension() {
-    let mut env = Env::initialized();
-    let issuer = env.funded_keypair();
+    let issuer = Keypair::new();
+    let mut env = env_with_fee_mint(&issuer, |env, issuer| {
+        let mint = env.create_mint_2022(Some(issuer), &[ExtensionType::MetadataPointer]);
+        env.corrupt_first_extension_type(&mint);
+        mint
+    });
     let authority = env.listing_authority.insecure_clone();
-    let mint = env.create_mint_2022(Some(issuer.pubkey()), &[ExtensionType::MetadataPointer]);
-    env.corrupt_first_extension_type(&mint);
+    let mint = env.fee_mint;
     assert_rejected_mint(&mut env, &issuer, &authority, mint, "unknown extension type");
 }
 
@@ -88,11 +111,12 @@ fn rejects_disallowed_extension_next_to_allowed_ones() {
     );
 }
 
-/// Each accepted extension set is listed through both paths (one mint each,
-/// since a mint can only be listed once).
+/// Each accepted extension set goes through every path (one mint for the
+/// equity, since a mint can only be listed once; the currency is also the
+/// fee mint, which gets its fee vault).
 fn assert_accepted(extensions: &[ExtensionType]) {
-    let mut env = Env::initialized();
-    let issuer = env.funded_keypair();
+    let issuer = Keypair::new();
+    let mut env = env_with_fee_mint(&issuer, |env, _| env.create_mint_2022(None, extensions));
     let authority = env.listing_authority.insecure_clone();
 
     let equity = env.create_mint_2022(Some(issuer.pubkey()), extensions);
@@ -100,12 +124,14 @@ fn assert_accepted(extensions: &[ExtensionType]) {
         .unwrap();
     assert_eq!(env.fetch::<Listing>(&listing_pda(&equity)).asset_mint, equity);
 
-    let currency = env.create_mint_2022(None, extensions);
+    let currency = env.fee_mint;
     env.list_currency(&authority, currency).unwrap();
     assert_eq!(
         env.fetch::<Listing>(&listing_pda(&currency)).asset_class,
         AssetClass::Currency
     );
+    env.init_fee_vault(&issuer, currency).unwrap();
+    assert_eq!(env.token_account(&fee_vault_pda(&currency)).mint, currency);
 }
 
 #[test]

@@ -12,7 +12,6 @@ use crate::{
     },
     mint_policy::{require_allowed_mint_extensions, require_no_freeze_authority},
     state::*,
-    token_vault::{create_pda_token_account, PdaTokenAccount},
 };
 
 /// Issuer-submitted listing for `Equity` / `FixedIncome` / `Credit`.
@@ -108,8 +107,8 @@ pub fn handle_submit_listing(
 /// listings, so the listing authority creates it directly as `Approved`, with no
 /// issuer and no cashback. Unlike asset mints, a currency mint may have a freeze
 /// authority (USDC does): an accepted, curated risk (spec §3.8).
-/// Also creates the currency's fee vault and fee ledger, so `settle` never has
-/// to.
+/// Creates no fee vault: fees are only charged in the fee mint, whose vault
+/// `init_fee_vault` creates (spec §3.4).
 #[event_cpi]
 #[derive(Accounts)]
 pub struct ListCurrency<'info> {
@@ -131,32 +130,12 @@ pub struct ListCurrency<'info> {
         bump
     )]
     pub listing: Box<Account<'info, Listing>>,
-    /// CHECK: PDA signer of the fee vaults; holds no data.
-    #[account(seeds = [VAULT_SEED], bump)]
-    pub vault_authority: UncheckedAccount<'info>,
-    /// CHECK: fee vault for this currency, created and initialized by the
-    /// handler *after* the mint allowlist check (an Anchor `init` would run
-    /// first and fail on some rejected mints with an unrelated error). A PDA
-    /// rather than an ATA: anyone can create an ATA, so creating one could be
-    /// front-run to block this listing.
-    #[account(mut, seeds = [FEE_VAULT_SEED, asset_mint.key().as_ref()], bump)]
-    pub fee_vault: UncheckedAccount<'info>,
-    #[account(
-        init,
-        payer = listing_authority,
-        space = 8 + FeeLedger::INIT_SPACE,
-        seeds = [FEE_LEDGER_SEED, asset_mint.key().as_ref()],
-        bump
-    )]
-    pub fee_ledger: Box<Account<'info, FeeLedger>>,
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
 pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
-    // Mint policy first, before anything is created for this mint.
     require_allowed_mint_extensions(&ctx.accounts.asset_mint.to_account_info())?;
-    create_fee_vault(&ctx.accounts, ctx.bumps.fee_vault)?;
 
     let now = Clock::get()?.unix_timestamp;
     let asset_class = AssetClass::Currency;
@@ -176,15 +155,6 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         bump: ctx.bumps.listing,
     };
     ctx.accounts.listing.set_inner(listing.clone());
-    ctx.accounts.fee_ledger.set_inner(FeeLedger {
-        payment_mint: listing.asset_mint,
-        fees_collected: 0,
-        cashback_accrued: 0,
-        protocol_withdrawn: 0,
-        cashback_withdrawn: 0,
-        bump: ctx.bumps.fee_ledger,
-        vault_bump: ctx.bumps.fee_vault,
-    });
     emit_cpi!(ListingApproved {
         listing: ctx.accounts.listing.key(),
         asset_mint: listing.asset_mint,
@@ -195,25 +165,6 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         approved_at: now,
     });
     Ok(())
-}
-
-/// Creates `["fee_vault", mint]` as a token account of `mint` owned by the vault
-/// authority, after the mint policy check (see `token_vault`).
-fn create_fee_vault(accounts: &ListCurrency, vault_bump: u8) -> Result<()> {
-    let mint_key = accounts.asset_mint.key();
-    let bump = [vault_bump];
-    let signer_seeds: &[&[&[u8]]] = &[&[FEE_VAULT_SEED, mint_key.as_ref(), &bump]];
-    create_pda_token_account(
-        PdaTokenAccount {
-            payer: &accounts.listing_authority.to_account_info(),
-            account: &accounts.fee_vault.to_account_info(),
-            mint: &accounts.asset_mint.to_account_info(),
-            authority: &accounts.vault_authority.to_account_info(),
-            token_program: accounts.token_program.key(),
-            system_program: accounts.system_program.key(),
-        },
-        signer_seeds,
-    )
 }
 
 /// Shared by `approve_listing`, `suspend_listing` and `delist`.

@@ -1,14 +1,20 @@
 //! Invariant fuzzing (spec §3.9): `proptest` drives random sequences of valid
 //! and invalid instructions against the real `.so` in LiteSVM, and checks
-//! invariants 1 to 11 after every step.
+//! invariants 1 to 12 after every step.
 //!
 //! Each case builds a fresh world:
 //! - listings: two `Equity` (SPL Token, Token-2022), one `FixedIncome`, one
-//!   `Credit`, and two `Currency` (SPL Token, Token-2022);
-//! - cashback ledgers for every cashback-eligible listing x currency;
+//!   `Credit`, and three `Currency`: USD, the fee mint (`Config.fee_mint`,
+//!   SPL Token or Token-2022, drawn per case) with the only fee vault, BRL
+//!   (Token-2022) and EUR (SPL Token);
+//! - cashback ledgers for every cashback-eligible listing, in USD;
 //! - one funded, fully delegated buyer/seller pair for every asset x payment
 //!   combination, including invalid ones (non-Equity asset, Currency as asset,
-//!   Equity as payment).
+//!   Equity as payment, a payment currency that is not the fee mint).
+//!
+//! Invariant 12: fees only ever accrue in USD. No fee vault or ledger exists
+//! for any other mint, every successful settlement pays in USD, and every
+//! executed deal has a USD leg whose receiver paid the fee.
 //!
 //! Actions are weighted towards valid settlements so that most steps move
 //! funds; the counters checked at the end make sure the run is not vacuous.
@@ -21,7 +27,8 @@
 //! that holder burns, so `supply == issued - burned` stays exact.
 //!
 //! P2P escrow (invariants 6 and 7): random `open_deal` on valid and invalid
-//! pairs (Equity asset, non-Currency payment, same mint), with expiries in
+//! pairs (Equity asset, non-Currency payment, same mint, no USD leg such as
+//! BRL <-> EUR), with expiries in
 //! and out of the 30-day window, then `accept_deal`, `cancel_deal` and
 //! `expire_deal` on tracked deals (incl. wrong signers, a crank redirecting
 //! the refund, replays of resolved deals) and donations into deal vaults.
@@ -42,9 +49,9 @@ use anchor_lang::prelude::Pubkey;
 use common::*;
 use niara_exchange::{
     events::{DealExecuted, DealOpened, IssuanceExecuted, Settled, TokensBurned},
-    math::split_payment,
-    AssetClass, BurnReason, CashbackLedger, Config, ConfigChange, DealSide, DealStatus, Listing,
-    ListingStatus, BPS_DENOMINATOR, MAX_DEAL_DURATION_SECS, MAX_FEE_BPS,
+    math::{split_payment, PaymentSplit},
+    AssetClass, BurnReason, CashbackLedger, Config, ConfigChange, DealSide, DealStatus, FeeLeg,
+    Listing, ListingStatus, BPS_DENOMINATOR, MAX_DEAL_DURATION_SECS, MAX_FEE_BPS,
 };
 use proptest::{
     prelude::*,
@@ -58,39 +65,44 @@ const E0: usize = 0; // Equity, SPL Token
 const E1: usize = 1; // Equity, Token-2022
 const FI: usize = 2; // FixedIncome
 const CR: usize = 3; // Credit
-const USD: usize = 4; // Currency, SPL Token
+const USD: usize = 4; // Currency, the fee mint (USDT), SPL Token or Token-2022
 const BRL: usize = 5; // Currency, Token-2022
-const LISTINGS: usize = 6;
-const CURRENCIES: [usize; 2] = [USD, BRL];
+const EUR: usize = 6; // Currency, SPL Token
+const LISTINGS: usize = 7;
+const CURRENCIES: [usize; 3] = [USD, BRL, EUR];
 
-/// (asset, payment) of every trader pair. The first four are the valid
+/// (asset, payment) of every trader pair. The first two are the valid
 /// markets; the rest must never settle.
 const PAIRS: [(usize, usize); 14] = [
     (E0, USD),
-    (E0, BRL),
     (E1, USD),
-    (E1, BRL),
+    (E0, BRL), // invariant 12: payment not in the fee mint
+    (E1, EUR),
     (FI, USD), // invariant 8
     (CR, BRL), // invariant 8
     (FI, BRL),
     (CR, USD),
-    (USD, BRL), // invariants 8 and 9: Currency as asset
-    (BRL, USD),
+    (BRL, USD), // invariants 8 and 9: Currency as asset
+    (USD, BRL),
     (E0, E1), // invariant 10: Equity as payment
     (E1, E0),
     (FI, E0),
     (USD, E0),
 ];
-const VALID_PAIRS: usize = 4;
+const VALID_PAIRS: usize = 2;
 
 /// (asset, payment) of every P2P pair. The first six are valid markets.
-const DEAL_PAIRS: [(usize, usize); 11] = [
+const DEAL_PAIRS: [(usize, usize); 15] = [
     (FI, USD),
-    (FI, BRL),
     (CR, USD),
-    (CR, BRL),
-    (USD, BRL), // Currency deal: BRL bought with USD
-    (BRL, USD),
+    (BRL, USD), // Currency deal: BRL sold for USD, fee on the payment leg
+    (USD, BRL), // USD sold for BRL: fee on the asset leg
+    (EUR, USD),
+    (USD, EUR),
+    (FI, BRL), // invariant 12: no USD leg
+    (CR, EUR),
+    (BRL, EUR),
+    (EUR, BRL),
     (E0, USD), // invariant 8: Equity never trades P2P
     (E1, BRL),
     (FI, E0), // invariant 10: Equity as payment
@@ -223,9 +235,11 @@ fn action() -> impl Strategy<Value = Action> {
     let status =
         (0..LISTINGS, status_op).prop_map(|(listing, op)| Action::Status { listing, op });
     let permille = prop_oneof![4 => 0u16..=1000, 1 => 1001u16..1100];
+    // Mostly the fee mint; the others have no fee vault, so must always fail.
+    let currency = || prop_oneof![6 => Just(USD), 1 => Just(BRL), 1 => Just(EUR)];
     let withdraw_cashback = (
         0..LISTINGS,
-        prop::sample::select(CURRENCIES.to_vec()),
+        currency(),
         permille.clone(),
         prop::bool::weighted(0.1),
         prop::bool::weighted(0.5),
@@ -240,7 +254,7 @@ fn action() -> impl Strategy<Value = Action> {
             },
         );
     let withdraw_fees = (
-        prop::sample::select(CURRENCIES.to_vec()),
+        currency(),
         permille,
         prop::bool::weighted(0.1),
     )
@@ -293,11 +307,11 @@ fn action() -> impl Strategy<Value = Action> {
         2 => (0i64..2 * TIMELOCK_SECS).prop_map(Action::Warp),
         1 => (0..PAIRS.len(), any::<bool>(), 0u64..2_000)
             .prop_map(|(pair, seller_side, amount)| Action::Delegate { pair, seller_side, amount }),
-        1 => (0..LISTINGS, prop::sample::select(vec![USD, BRL, E0]))
+        1 => (0..LISTINGS, prop::sample::select(vec![USD, USD, BRL, E0]))
             .prop_map(|(listing, currency)| Action::InitLedger { listing, currency }),
-        2 => (prop::sample::select(CURRENCIES.to_vec()), 1u64..1_000_000)
-            .prop_map(|(currency, amount)| Action::Donate { currency, amount }),
-        2 => (prop::sample::select(CURRENCIES.to_vec()), prop::bool::weighted(0.1))
+        // Only the fee mint has a fee vault to donate into.
+        2 => (1u64..1_000_000).prop_map(|amount| Action::Donate { currency: USD, amount }),
+        2 => (currency(), prop::bool::weighted(0.1))
             .prop_map(|(currency, intruder)| Action::Sweep { currency, intruder }),
         3 => (
             prop::sample::select(ISSUER_LISTINGS.to_vec()),
@@ -385,7 +399,8 @@ struct World {
 }
 
 impl World {
-    fn new() -> Self {
+    /// `fee_program`: token program of the fee mint (USD).
+    fn new(fee_program: Pubkey) -> Self {
         let mut env = Env::initialized();
         let authority = env.listing_authority.insecure_clone();
         let mut mints = Vec::new();
@@ -405,9 +420,13 @@ impl World {
             mints.push(mint);
             issuers.push(issuer);
         }
-        for program in [SPL_TOKEN, TOKEN_2022] {
+        // USD is the fee mint (listed, with its fee vault); BRL and EUR are
+        // plain currencies. Currency listings have no issuer; a stranger
+        // stands in.
+        mints.push(env.fee_currency(fee_program));
+        issuers.push(env.funded_keypair());
+        for program in [TOKEN_2022, SPL_TOKEN] {
             mints.push(env.listed_currency(program));
-            // Currency listings have no issuer; a stranger stands in.
             issuers.push(env.funded_keypair());
         }
 
@@ -415,11 +434,9 @@ impl World {
         let mut ledgers = HashSet::new();
         let mut issuer_dests = HashMap::new();
         for listing in [E0, E1, FI, CR] {
-            for currency in CURRENCIES {
-                env.init_cashback_ledger(&payer, mints[listing], mints[currency])
-                    .unwrap();
-                ledgers.insert((listing, currency));
-            }
+            env.init_cashback_ledger(&payer, mints[listing], mints[USD])
+                .unwrap();
+            ledgers.insert((listing, USD));
         }
         for listing in 0..LISTINGS {
             for currency in CURRENCIES {
@@ -600,7 +617,8 @@ impl World {
                         !CURRENCIES.contains(&listing),
                         "cashback ledger created for a Currency listing"
                     );
-                    prop_assert!(CURRENCIES.contains(&currency), "ledger for a non-currency");
+                    // Invariant 12: cashback is only ever in the fee mint.
+                    prop_assert_eq!(currency, USD, "cashback ledger for a non-fee mint");
                     prop_assert!(!existed, "ledger initialized twice");
                     self.ledgers.insert((listing, currency));
                 }
@@ -846,6 +864,7 @@ impl World {
         SWEEP_OK.fetch_add(1, Relaxed);
         prop_assert!(!paused, "swept while paused");
         prop_assert!(!intruder, "swept by a non-treasury");
+        prop_assert_eq!(currency, USD, "swept a non-fee mint");
         // Exactly the donations, never owed fees or cashback.
         prop_assert_eq!(self.env.balance(&dest) - before, excess);
         self.excess.insert(currency, 0);
@@ -915,6 +934,8 @@ impl World {
         prop_assert_eq!(asset_listing.asset_class, AssetClass::Equity);
         // Invariant 10.
         prop_assert!(payment_listing.is_approved_currency());
+        // Invariant 12: paid in the fee mint, so the seller pays the fee.
+        prop_assert_eq!(payment_index, USD, "settled in a non-fee mint");
 
         let events = events::<Settled>(&meta);
         prop_assert_eq!(events.len(), 1);
@@ -988,6 +1009,7 @@ impl World {
         prop_assert!(!frozen, "cashback withdrawn from a frozen listing");
         prop_assert!(!intruder, "cashback withdrawn by a non-issuer");
         prop_assert!(!CURRENCIES.contains(&asset), "cashback from a Currency listing");
+        prop_assert_eq!(currency, USD, "cashback withdrawn in a non-fee mint");
         prop_assert!(amount > 0 && amount <= available);
         prop_assert_eq!(self.env.balance(&dest) - before, amount);
         Ok(())
@@ -1000,7 +1022,11 @@ impl World {
         intruder: bool,
     ) -> Result<(), TestCaseError> {
         let mint = self.mints[currency];
-        let available = self.env.fee_ledger(&mint).protocol_available().unwrap();
+        let available = if self.env.exists(&fee_ledger_pda(&mint)) {
+            self.env.fee_ledger(&mint).protocol_available().unwrap()
+        } else {
+            0
+        };
         let amount = scaled(available, permille);
         let paused = self.config().paused;
         let signer = if intruder {
@@ -1019,6 +1045,7 @@ impl World {
         WITHDRAW_OK.fetch_add(1, Relaxed);
         prop_assert!(!paused, "protocol fees withdrawn while paused");
         prop_assert!(!intruder, "protocol fees withdrawn by a non-treasury");
+        prop_assert_eq!(currency, USD, "protocol fees withdrawn in a non-fee mint");
         prop_assert!(amount > 0 && amount <= available);
         prop_assert_eq!(self.env.balance(&dest) - before, amount);
         Ok(())
@@ -1086,13 +1113,13 @@ impl World {
         let payment_listing = self.listing(payment_index);
         let now = self.env.now();
         let expires_at = now.saturating_add(ttl);
-        let split = split_payment(
+        let fee = usd_fee(
+            DEAL_PAIRS[pair],
+            assets,
             payment,
-            config.fee_bps,
-            config.cashback_bps,
+            (config.fee_bps, config.cashback_bps),
             asset_listing.cashback_eligible,
-        )
-        .unwrap();
+        );
         let expected_ok = !config.paused
             && assets > 0
             && payment > 0
@@ -1102,7 +1129,8 @@ impl World {
             && asset_listing.status == ListingStatus::Approved
             && asset_listing.asset_class.is_p2p()
             && payment_listing.is_approved_currency()
-            && split.seller_receives > 0
+            // Invariant 12: a USD leg whose receiver still gets something.
+            && fee.is_some_and(|(_, split)| split.seller_receives > 0)
             && !existed;
 
         let p = &self.deal_parties[pair];
@@ -1166,13 +1194,15 @@ impl World {
         let asset_listing = self.listing(asset_index);
         let payment_listing = self.listing(payment_index);
         let now = self.env.now();
-        let split = split_payment(
+        // Only deals with a USD leg ever open.
+        let (leg, split) = usd_fee(
+            DEAL_PAIRS[d.pair],
+            d.assets,
             d.payment,
-            config.fee_bps,
-            config.cashback_bps,
+            (config.fee_bps, config.cashback_bps),
             asset_listing.cashback_eligible,
         )
-        .unwrap();
+        .expect("an open deal has a USD leg");
         let expected_ok = !intruder
             && d.status == DealStatus::Open
             && !config.paused
@@ -1218,14 +1248,22 @@ impl World {
         prop_assert!(payment_listing.is_approved_currency());
         let e = &events::<DealExecuted>(&meta)[0];
         prop_assert_eq!((e.fee, e.cashback), (split.fee, split.cashback));
+        prop_assert_eq!(e.fee_mint, self.mints[USD]);
         prop_assert_eq!(e.vault_excess, d.excess);
         if asset_listing.asset_class == AssetClass::Currency {
             prop_assert_eq!(e.cashback, 0, "cashback on a Currency deal");
         }
-        // Invariant 1.
-        prop_assert_eq!(d.payment, split.seller_receives + split.fee);
+        // Invariant 1, on the USD leg.
+        let usd_amount = if leg == FeeLeg::Asset { d.assets } else { d.payment };
+        prop_assert_eq!(usd_amount, split.seller_receives + split.fee);
 
-        // Invariant 6: the deposit (and any excess) went to the counterparty.
+        // Invariants 6 and 12: the deposit (and any excess) went to the
+        // counterparty; the receiver of the USD leg got it minus the fee, the
+        // other leg moved in full.
+        let (asset_fee, payment_fee) = match leg {
+            FeeLeg::Asset => (split.fee, 0),
+            FeeLeg::Payment => (0, split.fee),
+        };
         let p = &self.deal_parties[d.pair];
         let (pa, pp, ca, cp) = (
             p.proposer_asset,
@@ -1235,17 +1273,17 @@ impl World {
         );
         match d.side {
             DealSide::Sell => {
-                self.credit(ca, d.assets + d.excess);
+                self.credit(ca, d.assets - asset_fee + d.excess);
                 self.debit(cp, d.payment);
-                self.credit(pp, split.seller_receives);
+                self.credit(pp, d.payment - payment_fee);
             }
             DealSide::Buy => {
                 self.debit(ca, d.assets);
-                self.credit(pa, d.assets);
-                self.credit(cp, split.seller_receives + d.excess);
+                self.credit(pa, d.assets - asset_fee);
+                self.credit(cp, d.payment - payment_fee + d.excess);
             }
         }
-        let entry = self.model.get_mut(&payment_index).expect("payment is a currency");
+        let entry = self.model.get_mut(&USD).unwrap();
         entry.0 += split.fee;
         entry.1 += split.cashback;
         self.deals[index].status = DealStatus::Executed;
@@ -1408,7 +1446,21 @@ impl World {
         prop_assert!(config.fee_bps <= MAX_FEE_BPS, "fee_bps {}", config.fee_bps);
         prop_assert!(config.cashback_bps <= BPS_DENOMINATOR);
 
-        for currency in CURRENCIES {
+        // Invariant 12: one fee mint, and no fee account for any other mint.
+        prop_assert_eq!(config.fee_mint, self.mints[USD]);
+        for (index, mint) in self.mints.iter().enumerate() {
+            if index != USD {
+                prop_assert!(!self.env.exists(&fee_ledger_pda(mint)), "fee ledger for {index}");
+                prop_assert!(!self.env.exists(&fee_vault_pda(mint)), "fee vault for {index}");
+            }
+        }
+        for currency in [BRL, EUR] {
+            prop_assert_eq!(self.model[&currency], (0, 0), "fees modelled in a non-fee mint");
+            prop_assert_eq!(self.excess[&currency], 0);
+        }
+
+        {
+            let currency = USD;
             let mint = self.mints[currency];
             let ledger = self.env.fee_ledger(&mint);
             let (fees, cashback) = self.model[&currency];
@@ -1460,7 +1512,7 @@ impl World {
 
         // Invariant 9: no Currency listing ever has a cashback ledger.
         for listing in CURRENCIES {
-            for currency in [USD, BRL, E0] {
+            for currency in [USD, BRL, EUR, E0] {
                 prop_assert!(!self
                     .env
                     .exists(&cashback_pda(&self.mints[listing], &self.mints[currency])));
@@ -1468,6 +1520,26 @@ impl World {
         }
         Ok(())
     }
+}
+
+/// The USD (fee-mint) leg of a deal and the fee on it (spec §3.4): the payment
+/// when it is USD, else the asset when it is USD; `None` when the deal has no
+/// USD leg (it can never open).
+fn usd_fee(
+    (asset_index, payment_index): (usize, usize),
+    assets: u64,
+    payment: u64,
+    (fee_bps, cashback_bps): (u16, u16),
+    eligible: bool,
+) -> Option<(FeeLeg, PaymentSplit)> {
+    let (leg, amount) = if payment_index == USD {
+        (FeeLeg::Payment, payment)
+    } else if asset_index == USD {
+        (FeeLeg::Asset, assets)
+    } else {
+        return None;
+    };
+    Some((leg, split_payment(amount, fee_bps, cashback_bps, eligible).unwrap()))
 }
 
 /// `permille` of `available`; above 1000 asks for more than is available.
@@ -1490,8 +1562,9 @@ fn invariants_hold_under_random_instruction_sequences() {
         failure_persistence: None,
         ..ProptestConfig::default()
     });
-    let result = runner.run(&prop::collection::vec(action(), 1..80), |actions| {
-        let mut world = World::new();
+    let strategy = (any::<bool>(), prop::collection::vec(action(), 1..80));
+    let result = runner.run(&strategy, |(fee_mint_2022, actions)| {
+        let mut world = World::new(if fee_mint_2022 { TOKEN_2022 } else { SPL_TOKEN });
         world.check_invariants()?;
         for action in actions {
             world.apply(action)?;
@@ -1541,7 +1614,7 @@ fn invariants_hold_under_random_instruction_sequences() {
 /// in between; the invalid pairs never open.
 #[test]
 fn every_deposit_ends_in_exactly_one_place() {
-    let mut world = World::new();
+    let mut world = World::new(TOKEN_2022);
     let mut id = 0u8;
     for pair in 0..DEAL_PAIRS.len() {
         for sell in [true, false] {
@@ -1585,12 +1658,13 @@ fn every_deposit_ends_in_exactly_one_place() {
     }
 }
 
-/// Deterministic sweep of invariants 8, 9 and 10: every invalid market (non-
-/// Equity asset, Currency as asset, Equity as payment) is attempted with
-/// healthy delegations and listings. None may settle.
+/// Deterministic sweep of invariants 8, 9, 10 and 12: every invalid market
+/// (non-Equity asset, Currency as asset, Equity as payment, a payment
+/// currency that is not the fee mint) is attempted with healthy delegations
+/// and listings. None may settle.
 #[test]
 fn invalid_markets_never_settle() {
-    let mut world = World::new();
+    let mut world = World::new(SPL_TOKEN);
     for (pair, _) in PAIRS.iter().enumerate().skip(VALID_PAIRS) {
         for id in 0..3u8 {
             world
@@ -1599,7 +1673,5 @@ fn invalid_markets_never_settle() {
         }
     }
     world.check_invariants().unwrap();
-    for currency in CURRENCIES {
-        assert_eq!(world.env.fee_ledger(&world.mints[currency]).fees_collected, 0);
-    }
+    assert_eq!(world.env.fee_ledger(&world.mints[USD]).fees_collected, 0);
 }

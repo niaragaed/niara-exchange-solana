@@ -188,7 +188,33 @@ impl Env {
         self.svm.get_account(address).unwrap().owner
     }
 
-    /// Lists `payment_mint` as an approved currency and returns it.
+    /// The fee mint (USDT, `Config.fee_mint` of the default params), ready to
+    /// trade: creates it under `token_program` unless it exists, lists it as
+    /// a currency and creates its fee vault, each step only if not done yet.
+    pub fn fee_currency(&mut self, token_program: Pubkey) -> Pubkey {
+        let mint = self.fee_mint;
+        if !self.exists(&mint) {
+            self.create_mint_at(mint, token_program, Some(Pubkey::new_unique()));
+            self.set_mint_decimals(&mint, PAYMENT_DECIMALS);
+        }
+        if !self.exists(&listing_pda(&mint)) {
+            let authority = self.listing_authority.insecure_clone();
+            self.list_currency(&authority, mint).unwrap();
+        }
+        if !self.exists(&fee_vault_pda(&mint)) {
+            let payer = self.admin.insecure_clone();
+            self.init_fee_vault(&payer, mint).unwrap();
+        }
+        assert_eq!(
+            self.owner_of(&mint),
+            token_program,
+            "the fee mint already exists under the other token program"
+        );
+        mint
+    }
+
+    /// Lists a new currency that is **not** the fee mint (e.g. BRL) and
+    /// returns it. No fee vault: fees are never charged in it.
     pub fn listed_currency(&mut self, token_program: Pubkey) -> Pubkey {
         let mint = self.create_mint(token_program, Some(Pubkey::new_unique()));
         self.set_mint_decimals(&mint, PAYMENT_DECIMALS);
@@ -209,11 +235,12 @@ impl Env {
         (mint, issuer)
     }
 
-    /// A ready-to-settle market: approved equity + approved currency, cashback
+    /// A ready-to-settle market: approved equity paid in the fee mint, cashback
     /// ledger, funded accounts, and both delegations granted to the vault.
+    /// Every market of one env shares the fee mint (and so its fee ledger).
     pub fn market(&mut self, asset_program: Pubkey, payment_program: Pubkey) -> Market {
         let (asset_mint, issuer) = self.listed_equity(asset_program);
-        let payment_mint = self.listed_currency(payment_program);
+        let payment_mint = self.fee_currency(payment_program);
         let payer = self.admin.insecure_clone();
         self.init_cashback_ledger(&payer, asset_mint, payment_mint)
             .unwrap();
@@ -334,18 +361,20 @@ impl Env {
         self.send(&[ix], &[signer])
     }
 
+    /// The program keys the ledger by `Config.fee_mint`; `fee_mint` here only
+    /// picks the address passed in (a wrong one fails the seeds check).
     pub fn init_cashback_ledger(
         &mut self,
         payer: &Keypair,
         asset_mint: Pubkey,
-        payment_mint: Pubkey,
+        fee_mint: Pubkey,
     ) -> TransactionResult {
         let ix = ix(
             accounts::InitCashbackLedger {
                 payer: payer.pubkey(),
+                config: config_pda(),
                 listing: listing_pda(&asset_mint),
-                payment_listing: listing_pda(&payment_mint),
-                cashback_ledger: cashback_pda(&asset_mint, &payment_mint),
+                cashback_ledger: cashback_pda(&asset_mint, &fee_mint),
                 system_program: system_program::ID,
             },
             instruction::InitCashbackLedger {},

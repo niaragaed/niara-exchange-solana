@@ -7,6 +7,8 @@ pub struct InitializeConfigParams {
     pub listing_authority: Pubkey,
     pub settlement_operator: Pubkey,
     pub treasury: Pubkey,
+    /// The USDT mint (spec §3.4). `init_fee_vault` then creates its vault.
+    pub fee_mint: Pubkey,
     pub fee_bps: u16,
     pub cashback_bps: u16,
     pub timelock_secs: i64,
@@ -46,6 +48,7 @@ pub fn handle_initialize_config(
     validate_address(&params.listing_authority)?;
     validate_address(&params.settlement_operator)?;
     validate_address(&params.treasury)?;
+    validate_address(&params.fee_mint)?;
     validate_fee_bps(params.fee_bps)?;
     validate_cashback_bps(params.cashback_bps)?;
     validate_timelock(params.timelock_secs)?;
@@ -55,6 +58,7 @@ pub fn handle_initialize_config(
         listing_authority: params.listing_authority,
         settlement_operator: params.settlement_operator,
         treasury: params.treasury,
+        fee_mint: params.fee_mint,
         fee_bps: params.fee_bps,
         cashback_bps: params.cashback_bps,
         paused: false,

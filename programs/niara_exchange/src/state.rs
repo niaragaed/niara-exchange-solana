@@ -10,7 +10,11 @@ pub struct Config {
     pub listing_authority: Pubkey,
     pub settlement_operator: Pubkey,
     pub treasury: Pubkey,
-    /// Protocol fee, in bps of the payment amount. Always `<= MAX_FEE_BPS`.
+    /// The USDT mint. Every fee, and so all cashback, is charged in it; one
+    /// fee vault and one fee ledger exist, for this mint (spec §3.4).
+    /// Changed only through the timelock.
+    pub fee_mint: Pubkey,
+    /// Protocol fee, in bps of the fee-mint leg. Always `<= MAX_FEE_BPS`.
     pub fee_bps: u16,
     /// Issuer cashback, in bps **of the fee**. Always `<= BPS_DENOMINATOR`.
     pub cashback_bps: u16,
@@ -26,6 +30,34 @@ impl Config {
         require!(!self.paused, ExchangeError::Paused);
         Ok(())
     }
+
+    /// Which leg of a trade carries the fee (spec §3.4). The payment when it
+    /// is the fee mint; for a `Currency` asset, the asset when that is the
+    /// fee mint (USDT sold for another currency). Anything else has no
+    /// fee-mint leg and is rejected (`NotFeeMint`), e.g. BRL <-> EUR. Callers
+    /// reject `asset_mint == payment_mint` before.
+    pub fn fee_leg(
+        &self,
+        asset_class: AssetClass,
+        asset_mint: &Pubkey,
+        payment_mint: &Pubkey,
+    ) -> Result<FeeLeg> {
+        if *payment_mint == self.fee_mint {
+            Ok(FeeLeg::Payment)
+        } else if asset_class == AssetClass::Currency && *asset_mint == self.fee_mint {
+            Ok(FeeLeg::Asset)
+        } else {
+            err!(ExchangeError::NotFeeMint)
+        }
+    }
+}
+
+/// The leg of a trade that is in the fee mint: its receiver pays the fee out
+/// of it, and the other leg moves in full.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FeeLeg {
+    Asset,
+    Payment,
 }
 
 pub fn validate_fee_bps(fee_bps: u16) -> Result<()> {
@@ -64,6 +96,9 @@ pub enum ConfigChange {
     ListingAuthority(Pubkey),
     Treasury(Pubkey),
     Admin(Pubkey),
+    /// Switch the fee currency (spec §3.4). Old balances stay in the old
+    /// mint's vault and ledgers; `init_fee_vault` creates the new ones.
+    FeeMint(Pubkey),
 }
 
 impl ConfigChange {
@@ -75,6 +110,7 @@ impl ConfigChange {
             ConfigChange::ListingAuthority(_) => 3,
             ConfigChange::Treasury(_) => 4,
             ConfigChange::Admin(_) => 5,
+            ConfigChange::FeeMint(_) => 6,
         }
     }
 
@@ -85,7 +121,8 @@ impl ConfigChange {
             ConfigChange::SettlementOperator(k)
             | ConfigChange::ListingAuthority(k)
             | ConfigChange::Treasury(k)
-            | ConfigChange::Admin(k) => validate_address(k),
+            | ConfigChange::Admin(k)
+            | ConfigChange::FeeMint(k) => validate_address(k),
         }
     }
 
@@ -100,6 +137,7 @@ impl ConfigChange {
             ConfigChange::ListingAuthority(k) => config.listing_authority = k,
             ConfigChange::Treasury(k) => config.treasury = k,
             ConfigChange::Admin(k) => config.admin = k,
+            ConfigChange::FeeMint(k) => config.fee_mint = k,
         }
         Ok(())
     }
@@ -206,8 +244,9 @@ impl Listing {
     }
 }
 
-/// Issuer cashback owed for one listing, in one payment mint.
-/// PDA: `["cashback", listing, payment_mint]`. Created by `init_cashback_ledger`.
+/// Issuer cashback owed for one listing, in the fee mint it was created for
+/// (`payment_mint`). PDA: `["cashback", listing, fee_mint]`. Created by
+/// `init_cashback_ledger` for the current `Config.fee_mint`.
 #[account]
 #[derive(InitSpace, Debug)]
 pub struct CashbackLedger {
@@ -226,9 +265,11 @@ impl CashbackLedger {
     }
 }
 
-/// Fee accounting for one payment mint. PDA: `["fees", payment_mint]`.
-/// Created by `list_currency` together with the fee vault
-/// `["fee_vault", payment_mint]`.
+/// Fee accounting for the fee mint (`payment_mint`, USDT). PDA:
+/// `["fees", fee_mint]`. Created by `init_fee_vault` together with the fee
+/// vault `["fee_vault", fee_mint]`. One exists per fee mint ever configured
+/// (normally one); a timelocked fee-mint switch leaves the old one
+/// withdrawable.
 ///
 /// `fees_collected` is the gross fee (protocol share + cashback). Derived:
 /// - protocol share accrued = `fees_collected - cashback_accrued`
@@ -459,6 +500,7 @@ mod tests {
             ConfigChange::ListingAuthority(k),
             ConfigChange::Treasury(k),
             ConfigChange::Admin(k),
+            ConfigChange::FeeMint(k),
         ]
         .iter()
         .map(ConfigChange::kind)
@@ -477,6 +519,43 @@ mod tests {
         assert!(ConfigChange::CashbackBps(BPS_DENOMINATOR + 1).validate().is_err());
         assert!(ConfigChange::Admin(Pubkey::default()).validate().is_err());
         assert!(ConfigChange::Treasury(Pubkey::new_unique()).validate().is_ok());
+        assert!(ConfigChange::FeeMint(Pubkey::default()).validate().is_err());
+        assert!(ConfigChange::FeeMint(Pubkey::new_unique()).validate().is_ok());
+    }
+
+    #[test]
+    fn fee_legs() {
+        let usdt = Pubkey::new_unique();
+        let brl = Pubkey::new_unique();
+        let eur = Pubkey::new_unique();
+        let bond = Pubkey::new_unique();
+        let config = Config {
+            admin: Pubkey::new_unique(),
+            listing_authority: Pubkey::new_unique(),
+            settlement_operator: Pubkey::new_unique(),
+            treasury: Pubkey::new_unique(),
+            fee_mint: usdt,
+            fee_bps: 0,
+            cashback_bps: 0,
+            paused: false,
+            timelock_secs: MIN_TIMELOCK_SECS,
+            bump: 0,
+        };
+        use AssetClass::*;
+        let leg = |class: AssetClass, asset: &Pubkey, payment: &Pubkey| {
+            config.fee_leg(class, asset, payment).ok()
+        };
+        for class in [Equity, FixedIncome, Credit, Currency] {
+            assert_eq!(leg(class, &bond, &usdt), Some(FeeLeg::Payment));
+            assert_eq!(leg(class, &bond, &brl), None);
+        }
+        // Currency: USDT on either side, never neither.
+        assert_eq!(leg(Currency, &brl, &usdt), Some(FeeLeg::Payment));
+        assert_eq!(leg(Currency, &usdt, &brl), Some(FeeLeg::Asset));
+        assert_eq!(leg(Currency, &brl, &eur), None);
+        // Only a Currency asset can carry the fee.
+        assert_eq!(leg(FixedIncome, &usdt, &brl), None);
+        assert_eq!(leg(Credit, &usdt, &brl), None);
     }
 
     #[test]

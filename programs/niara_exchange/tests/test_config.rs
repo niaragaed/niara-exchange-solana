@@ -72,11 +72,16 @@ fn initialize_config_validates_params() {
     p.treasury = Pubkey::default();
     assert_custom_err(env.initialize_config(&admin, p), ExchangeError::InvalidAddress);
 
+    let mut p = env.default_params();
+    p.fee_mint = Pubkey::default();
+    assert_custom_err(env.initialize_config(&admin, p), ExchangeError::InvalidAddress);
+
     // Boundary values are accepted.
     let mut p = env.default_params();
     p.fee_bps = MAX_FEE_BPS;
     p.cashback_bps = 10_000;
     env.initialize_config(&admin, p).unwrap();
+    assert_eq!(env.fetch::<Config>(&config_pda()).fee_mint, env.fee_mint);
 }
 
 #[test]
@@ -155,6 +160,31 @@ fn propose_validates_change() {
         env.propose(&admin, ConfigChange::Admin(Pubkey::default())),
         ExchangeError::InvalidAddress,
     );
+    assert_custom_err(
+        env.propose(&admin, ConfigChange::FeeMint(Pubkey::default())),
+        ExchangeError::InvalidAddress,
+    );
+}
+
+/// The fee mint has no setter outside the timelock: only the admin can
+/// propose a switch, and it applies only after the delay.
+#[test]
+fn fee_mint_changes_only_through_the_timelock() {
+    let mut env = Env::initialized();
+    let admin = env.admin.insecure_clone();
+    let other = env.funded_keypair();
+    let old = env.fee_mint;
+    let change = ConfigChange::FeeMint(Pubkey::new_unique());
+
+    assert_custom_err(env.propose(&other, change), ExchangeError::Unauthorized);
+    env.propose(&admin, change).unwrap();
+    assert_custom_err(env.execute(&admin, &change), ExchangeError::TimelockNotElapsed);
+    assert_eq!(env.fetch::<Config>(&config_pda()).fee_mint, old);
+    env.warp_secs(TIMELOCK_SECS);
+    assert_custom_err(env.execute(&other, &change), ExchangeError::Unauthorized);
+    env.execute(&admin, &change).unwrap();
+    let ConfigChange::FeeMint(new) = change else { unreachable!() };
+    assert_eq!(env.fetch::<Config>(&config_pda()).fee_mint, new);
 }
 
 #[test]
@@ -225,12 +255,14 @@ fn every_change_kind_applies() {
     let operator = Pubkey::new_unique();
     let authority = Pubkey::new_unique();
     let treasury = Pubkey::new_unique();
+    let fee_mint = Pubkey::new_unique();
     let changes = [
         ConfigChange::FeeBps(MAX_FEE_BPS),
         ConfigChange::CashbackBps(5_000),
         ConfigChange::SettlementOperator(operator),
         ConfigChange::ListingAuthority(authority),
         ConfigChange::Treasury(treasury),
+        ConfigChange::FeeMint(fee_mint),
     ];
     for c in changes {
         env.propose(&admin, c).unwrap();
@@ -245,4 +277,5 @@ fn every_change_kind_applies() {
     assert_eq!(config.settlement_operator, operator);
     assert_eq!(config.listing_authority, authority);
     assert_eq!(config.treasury, treasury);
+    assert_eq!(config.fee_mint, fee_mint);
 }

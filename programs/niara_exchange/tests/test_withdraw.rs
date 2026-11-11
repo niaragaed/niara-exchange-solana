@@ -300,12 +300,13 @@ fn sweep_without_excess_is_rejected() {
     assert_custom_err(s.sweep(), ExchangeError::NothingToSweep);
     assert_eq!(s.env.balance(&s.treasury_dest), PROTOCOL);
 
-    // A fresh currency: empty vault, nothing owed.
+    // Another currency has no fee vault or ledger at all: fees are only in
+    // the fee mint.
     let currency = s.env.listed_currency(SPL_TOKEN);
     let treasury = s.treasury();
     let dest = s.env.create_token_account(SPL_TOKEN, currency, treasury.pubkey(), 0);
     let res = s.env.sweep_excess(&treasury, currency, dest);
-    assert_custom_err(res, ExchangeError::NothingToSweep);
+    assert_custom_err(res, AnchorError::AccountNotInitialized);
 }
 
 /// Donations interleaved with settlements and partial withdrawals: the sweep

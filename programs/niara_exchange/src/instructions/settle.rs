@@ -48,7 +48,12 @@ pub struct Settle<'info> {
 
     #[account(mint::token_program = asset_token_program)]
     pub asset_mint: Box<InterfaceAccount<'info, Mint>>,
-    #[account(mint::token_program = payment_token_program)]
+    /// Always the fee mint (USDT): the seller receives it and pays the fee out
+    /// of it (spec §3.4).
+    #[account(
+        mint::token_program = payment_token_program,
+        constraint = payment_mint.key() == config.fee_mint @ ExchangeError::NotFeeMint
+    )]
     pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
 
     /// CHECK: the seller's wallet. Only used as the required owner of the two
@@ -223,7 +228,7 @@ pub fn handle_settle(
     )?;
 
     // 4. Accounting: the fee ledger tracks the gross fee and the cashback
-    // share per payment mint; the cashback ledger tracks it per listing.
+    // share in the fee mint; the cashback ledger tracks it per listing.
     ctx.accounts
         .fee_ledger
         .record_fee(split.fee, split.cashback)?;

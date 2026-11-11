@@ -158,11 +158,13 @@ pub struct DealOpened {
     pub expires_at: i64,
 }
 
-/// A P2P deal executed. Same accounting as `Settled`:
-/// `payment_amount == seller_receives + fee`, and `cashback` is the part of
-/// `fee` credited to the asset issuer (0 for `Currency` assets).
-/// `vault_excess` is what the escrow vault held beyond the deposit (tokens sent
-/// to it outside `open_deal`); it went to the counterparty with the deposit.
+/// A P2P deal executed. Same accounting as `Settled`, on the USDT leg:
+/// `fee` is in `fee_mint` (the payment mint, or the asset mint when the
+/// currency sold is USDT) and was deducted from what the receiver of that leg
+/// got; `cashback` is the part of `fee` credited to the asset issuer (0 for
+/// `Currency` assets). `vault_excess` is what the escrow vault held beyond the
+/// deposit (tokens sent to it outside `open_deal`); it went to the
+/// counterparty with the deposit.
 #[event]
 pub struct DealExecuted {
     pub deal: Pubkey,
@@ -174,6 +176,7 @@ pub struct DealExecuted {
     pub proposer_side: DealSide,
     pub asset_amount: u64,
     pub payment_amount: u64,
+    pub fee_mint: Pubkey,
     pub fee: u64,
     pub cashback: u64,
     pub vault_excess: u64,
@@ -211,4 +214,13 @@ pub struct ExcessSwept {
     pub destination: Pubkey,
     pub amount: u64,
     pub vault_balance_after: u64,
+}
+
+/// The fee vault and fee ledger of `fee_mint` exist; fees in it can be
+/// collected from now on.
+#[event]
+pub struct FeeVaultInitialized {
+    pub fee_mint: Pubkey,
+    pub fee_vault: Pubkey,
+    pub fee_ledger: Pubkey,
 }

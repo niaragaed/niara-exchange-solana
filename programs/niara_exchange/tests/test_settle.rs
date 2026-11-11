@@ -114,16 +114,15 @@ fn settles_mixed_token_programs() {
 /// Allowlisted metadata extensions do not get in the way of `transfer_checked`.
 #[test]
 fn settles_token_2022_metadata_mints() {
-    let mut env = Env::initialized();
-    let issuer = env.funded_keypair();
     let exts = [ExtensionType::MetadataPointer, ExtensionType::TokenMetadata];
+    let mut env = Env::initialized_with_fee_mint(|env| env.create_mint_2022(None, &exts));
+    let issuer = env.funded_keypair();
     let asset_mint = env.create_mint_2022(Some(issuer.pubkey()), &exts);
     env.submit_listing(&issuer, asset_mint, AssetClass::Equity, DOC_HASH)
         .unwrap();
     let authority = env.listing_authority.insecure_clone();
     env.approve(&authority, asset_mint).unwrap();
-    let payment_mint = env.create_mint_2022(None, &exts);
-    env.list_currency(&authority, payment_mint).unwrap();
+    let payment_mint = env.fee_currency(TOKEN_2022);
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
         .unwrap();
@@ -219,7 +218,7 @@ fn zero_fee_after_timelocked_change() {
 fn partial_fills_draw_on_one_delegation() {
     let mut env = Env::initialized();
     let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN);
-    let payment_mint = env.listed_currency(SPL_TOKEN);
+    let payment_mint = env.fee_currency(SPL_TOKEN);
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
         .unwrap();
@@ -378,7 +377,7 @@ fn rejects_pending_asset_listing() {
     let asset_mint = env.create_mint(SPL_TOKEN, Some(issuer.pubkey()));
     env.submit_listing(&issuer, asset_mint, AssetClass::Equity, DOC_HASH)
         .unwrap();
-    let payment_mint = env.listed_currency(SPL_TOKEN);
+    let payment_mint = env.fee_currency(SPL_TOKEN);
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
         .unwrap();
@@ -398,7 +397,7 @@ fn rejects_fixed_income_and_credit_assets() {
             .unwrap();
         let authority = env.listing_authority.insecure_clone();
         env.approve(&authority, asset_mint).unwrap();
-        let payment_mint = env.listed_currency(SPL_TOKEN);
+        let payment_mint = env.fee_currency(SPL_TOKEN);
         let payer = env.admin.insecure_clone();
         env.init_cashback_ledger(&payer, asset_mint, payment_mint)
             .unwrap();
@@ -416,7 +415,7 @@ fn rejects_fixed_income_and_credit_assets() {
 fn rejects_currency_as_asset() {
     let mut env = Env::initialized();
     let asset_currency = env.listed_currency(SPL_TOKEN);
-    let payment_mint = env.listed_currency(SPL_TOKEN);
+    let payment_mint = env.fee_currency(SPL_TOKEN);
     let payer = env.admin.insecure_clone();
     let res = env.init_cashback_ledger(&payer, asset_currency, payment_mint);
     assert_custom_err(res, ExchangeError::NotCashbackEligible);
@@ -446,19 +445,34 @@ fn rejects_payment_mint_that_is_not_an_approved_currency() {
     assert_untouched(&env, &m, before, order_id(1));
 }
 
-/// An equity mint used as payment: not a currency, so it has no fee vault and
-/// no cashback ledger can exist for it.
+/// Fees are always in USDT, so `settle` pays only in the fee mint: neither
+/// another approved currency (BRL) nor an equity mint. The fee ledger, fee
+/// vault and cashback ledger passed are the real (fee-mint) ones, so the
+/// payment mint is the only thing wrong.
 #[test]
-fn rejects_equity_as_payment_mint() {
+fn rejects_payment_mint_that_is_not_the_fee_mint() {
     let mut env = Env::initialized();
-    let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN);
-    let (other_equity, _) = env.listed_equity(SPL_TOKEN);
-    let payer = env.admin.insecure_clone();
-    let res = env.init_cashback_ledger(&payer, asset_mint, other_equity);
-    assert_custom_err(res, ExchangeError::InvalidPaymentMint);
-    let m = env.trader_pair(asset_mint, other_equity, issuer, 100, PAYMENT);
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
-    assert!(res.is_err());
+    let m = env.market(SPL_TOKEN, SPL_TOKEN);
+    let brl = env.listed_currency(SPL_TOKEN);
+    let (equity, _) = env.listed_equity(SPL_TOKEN);
+    let operator = env.operator.insecure_clone();
+    for payment_mint in [brl, equity] {
+        let issuer = m.issuer.insecure_clone();
+        let other = env.trader_pair(m.asset_mint, payment_mint, issuer, 100, PAYMENT);
+        let mut a = env.settle_accounts(&other);
+        a.fee_ledger = fee_ledger_pda(&m.payment_mint);
+        a.fee_vault = fee_vault_pda(&m.payment_mint);
+        a.cashback_ledger = m.cashback_ledger();
+        let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+        assert_custom_err(res, ExchangeError::NotFeeMint);
+        assert_eq!(env.balance(&other.buyer_payment), PAYMENT);
+    }
+    // Neither ever gets a fee vault or a fee ledger.
+    for mint in [brl, equity] {
+        assert!(!env.exists(&fee_vault_pda(&mint)));
+        assert!(!env.exists(&fee_ledger_pda(&mint)));
+    }
+    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
 }
 
 #[test]
@@ -656,8 +670,28 @@ fn rejects_cashback_ledger_of_another_listing() {
 fn requires_an_initialized_cashback_ledger() {
     let mut env = Env::initialized();
     let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN);
-    let payment_mint = env.listed_currency(SPL_TOKEN);
+    let payment_mint = env.fee_currency(SPL_TOKEN);
     let m = env.trader_pair(asset_mint, payment_mint, issuer, 100, PAYMENT);
     let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::AccountNotInitialized);
+}
+
+/// The fee mint is listed but `init_fee_vault` has not run yet: there is no
+/// fee vault or ledger to collect into, so nothing settles.
+#[test]
+fn requires_the_fee_vault() {
+    let mut env = Env::initialized();
+    let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN);
+    let usdt = env.fee_mint;
+    env.create_mint_at(usdt, SPL_TOKEN, Some(Pubkey::new_unique()));
+    let authority = env.listing_authority.insecure_clone();
+    env.list_currency(&authority, usdt).unwrap();
+    let payer = env.admin.insecure_clone();
+    env.init_cashback_ledger(&payer, asset_mint, usdt).unwrap();
+    let m = env.trader_pair(asset_mint, usdt, issuer, 100, PAYMENT);
+    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    assert_custom_err(res, AnchorError::AccountNotInitialized);
+
+    env.init_fee_vault(&payer, usdt).unwrap();
+    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
 }

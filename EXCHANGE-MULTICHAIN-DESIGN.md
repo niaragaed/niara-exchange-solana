@@ -720,29 +720,47 @@ account, so `token` plays the role of both `listing` and `asset_mint`).
 
 ### 4.2 EVM vs Solana differences (intentional)
 
-Aligned on both chains: asset classes, listing status table, `ListingApproved` on
-both listing paths (§4.1), issuance batches numbered from 1 with
-`requested_at`/`resolved_at`, `reject_issuance` in any listing status,
-`approve_issuance` blocked while paused, non-zero `doc_hash` / burn `reference`,
-`Currency` never cashback-eligible, `settle` only on `Approved` `Equity` against an
-`Approved` `Currency`. What still differs, on purpose:
+Aligned on both chains:
+- asset classes, listing status table, `ListingApproved` on both listing paths (§4.1);
+- issuance batches numbered from 1 with `requested_at`/`resolved_at`, `reject_issuance`
+  in any listing status, `approve_issuance` blocked while paused, non-zero `doc_hash` /
+  burn `reference`;
+- `Currency` never cashback-eligible; `settle` only on `Approved` `Equity` against an
+  `Approved` `Currency`;
+- **fees and cashback always in USDT** (§3.4). EVM: `settle` accepts only
+  `NiaraSettlement.feeToken` (`NotFeeToken` otherwise), which needs an `Approved`
+  `Currency` listing too and is switched only through the timelock
+  (`proposeSetFeeToken` / `executeSetFeeToken`); the seller, who receives the USDT,
+  pays the fee;
+- **one shared pause** with the same scope and principle (§3.3); where it lives differs,
+  see the table;
+- **per-listing cashback freeze** (§9.5). EVM: `ListingRegistry.freezeCashback` /
+  `unfreezeCashback` (LISTING_AUTHORITY_ROLE, no timelock, any listing status, allowed
+  while paused; `NotCashbackEligible` / `CashbackAlreadyFrozen` / `CashbackNotFrozen`;
+  `CashbackFreezeSet(token, frozen, listingAuthority)`); `CashbackDistributor.withdraw`
+  reverts `CashbackFrozen` while accrual continues;
+- **on-chain replay protection**: a match id settles at most once. EVM:
+  `settle(bytes16 matchId, ...)` sets `settledMatches[matchId]` before any transfer and
+  reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first,
+  like Solana's `order_id` (a storage slot instead of a `SettlementRecord` account, so
+  no rent).
+
+What still differs, on purpose:
 
 | Topic | Solana (`niara_exchange`) | EVM (`niara-contracts`) | Why |
 |---|---|---|---|
 | Asset token origin | Issuer creates the mint; `submit_listing` checks `supply == 0` and moves the mint authority to the program PDA | Issuer deploys through `AssetTokenFactory`; the token's only minter is the `ListingRegistry` from birth (no hand-over, no "finish metadata first" step) | An EVM token's code is fixed at deploy, so a factory gives a known implementation; on Solana the issuer's mint must be accepted and checked |
 | Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
 | Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
-| Pause scope | One `Config.paused` stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together | Per contract: `ListingRegistry.pause` stops `approveIssuance`; `NiaraSettlement.pause` stops `settle`; `CashbackDistributor` withdrawals have no pause | Existing EVM pattern (one `Pausable` per contract). An incident needs one call per contract; `PAUSER_ROLE` sits with the admin on each |
+| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle` and both `CashbackDistributor` withdrawals read it (`ProtocolPausable`, `EnforcedPause()`); those two contracts have no pause of their own. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
 | Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
 | Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
 | Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
 | Event vs effect order | `approve_issuance` mints, then updates state and emits | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md) | EVM external calls can re-enter; SPL token CPIs cannot |
 | Fee rounding | `fee = ceil(payment × fee_bps / 10 000)`; `ZeroSellerProceeds` if the seller would get 0 | `fee = floor(...)`, reverts `PaymentAmountTooSmallForFeePrecision` if it truncates to 0 while `feeBps > 0` | Pre-existing EVM behavior, kept unchanged; both prevent fee-free trades |
-| Replay protection | `settle(order_id)` creates `["settled", order_id]`: a match settles at most once on-chain | No match id on-chain; idempotency is the off-chain unique constraint on `match_id` (§5) | Not ported yet; candidate for the EVM settle adapter work |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
-| Fee currency | Always `Config.fee_mint` (USDT): `settle` pays in USDT, a `Currency` deal needs a USDT leg, the USDT receiver pays the fee (§3.4) | The payment token of each settlement | Not aligned yet: the EVM side keeps the pre-existing per-payment-token fee until it adopts the USDT rule |
-| Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; no ledger accounts, no sweep | Pre-existing EVM distributor, unchanged |
-| Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; no pause | Pre-existing EVM distributor, unchanged |
+| Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; balances are kept per (asset, token) and per token, so only USDT ever accrues, and a fee-token switch leaves old balances withdrawable; no ledger accounts, no sweep | Pre-existing EVM distributor; `settle` alone enforces the fee token |
+| Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 
 ---

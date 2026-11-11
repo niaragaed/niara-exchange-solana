@@ -8,6 +8,9 @@ The design spec is `EXCHANGE-MULTICHAIN-DESIGN.md`. Read it before changing the
 program; when behavior changes, update the spec in the same change (or before
 it, in its own commit, when asked to do the spec first).
 
+This repo owns `EXCHANGE-MULTICHAIN-DESIGN.md`. The EVM repo only receives
+copies; it proposes spec edits in its reports.
+
 ## Stack (pinned — do not bump without an explicit request)
 
 | Component | Version | Where it is pinned |

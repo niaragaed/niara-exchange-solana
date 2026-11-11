@@ -201,6 +201,8 @@ struct TrackedDeal {
     side: DealSide,
     assets: u64,
     payment: u64,
+    /// `(fee_bps, cashback_bps)` of the config at open: the deal's fee.
+    rates: (u16, u16),
     expires_at: i64,
     status: DealStatus,
     /// Tokens donated into the vault while open.
@@ -1113,11 +1115,12 @@ impl World {
         let payment_listing = self.listing(payment_index);
         let now = self.env.now();
         let expires_at = now.saturating_add(ttl);
+        let rates = (config.fee_bps, config.cashback_bps);
         let fee = usd_fee(
             DEAL_PAIRS[pair],
             assets,
             payment,
-            (config.fee_bps, config.cashback_bps),
+            rates,
             asset_listing.cashback_eligible,
         );
         let expected_ok = !config.paused
@@ -1163,6 +1166,10 @@ impl World {
         prop_assert!(payment_listing.is_approved_currency());
         let e = &events::<DealOpened>(&meta)[0];
         prop_assert_eq!((e.asset_amount, e.payment_amount, e.expires_at), (assets, payment, expires_at));
+        // The fee is part of the agreed terms: the config's rates at open.
+        prop_assert_eq!((e.fee_bps, e.cashback_bps), rates);
+        let deal = self.env.fetch_deal(&deal_key);
+        prop_assert_eq!((deal.fee_bps, deal.cashback_bps), rates);
 
         let deposit = if sell { assets } else { payment };
         let account = self.deal_parties[pair].deposit_account(side);
@@ -1173,6 +1180,7 @@ impl World {
             side,
             assets,
             payment,
+            rates,
             expires_at,
             status: DealStatus::Open,
             excess: 0,
@@ -1194,22 +1202,24 @@ impl World {
         let asset_listing = self.listing(asset_index);
         let payment_listing = self.listing(payment_index);
         let now = self.env.now();
-        // Only deals with a USD leg ever open.
+        // Only deals with a USD leg ever open. The fee is the one stored at
+        // open, whatever fee changes executed since.
         let (leg, split) = usd_fee(
             DEAL_PAIRS[d.pair],
             d.assets,
             d.payment,
-            (config.fee_bps, config.cashback_bps),
+            d.rates,
             asset_listing.cashback_eligible,
         )
         .expect("an open deal has a USD leg");
+        // Checked at open with the same rates, so it holds for good.
+        prop_assert!(split.seller_receives > 0, "deal {:?} cannot pay its fee", d);
         let expected_ok = !intruder
             && d.status == DealStatus::Open
             && !config.paused
             && now < d.expires_at
             && asset_listing.status == ListingStatus::Approved
-            && payment_listing.is_approved_currency()
-            && split.seller_receives > 0;
+            && payment_listing.is_approved_currency();
 
         let p = &self.deal_parties[d.pair];
         let res = if intruder {

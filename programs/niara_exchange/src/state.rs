@@ -410,6 +410,11 @@ pub struct Deal {
     pub payment_mint: Pubkey,
     pub asset_amount: u64,
     pub payment_amount: u64,
+    /// `Config.fee_bps` and `Config.cashback_bps` when the deal was opened.
+    /// The fee is part of the agreed terms: `accept_deal` charges these, not
+    /// the values in force then.
+    pub fee_bps: u16,
+    pub cashback_bps: u16,
     pub proposer_side: DealSide,
     /// The deal can be accepted while `now < expires_at`, and expired once
     /// `now >= expires_at`.
@@ -570,6 +575,8 @@ mod tests {
             payment_mint: payment,
             asset_amount: 3,
             payment_amount: 500,
+            fee_bps: 30,
+            cashback_bps: 2_000,
             proposer_side: DealSide::Sell,
             expires_at: 0,
             status: DealStatus::Open,

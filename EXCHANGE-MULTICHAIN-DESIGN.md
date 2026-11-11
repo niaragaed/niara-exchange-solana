@@ -128,7 +128,7 @@ interface SettlementAdapter {
 | `CashbackLedger` | `["cashback", listing, fee_mint]` | `listing`, `payment_mint` (= the fee mint it was created for), `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` for a cashback-eligible listing and the current `Config.fee_mint`, never lazily inside `settle` |
 | `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
 | `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
-| `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
+| `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `fee_bps`, `cashback_bps` (the config's rates at `open_deal`, charged at `accept_deal`: the fee is part of the agreed terms, §3.5), `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
 | Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
 | Fee vault | `["fee_vault", fee_mint]` token account, authority = vault authority | **one**, in the fee mint: holds protocol fees + unclaimed cashback (+ unaccounted donations until swept). Created by `init_fee_vault` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `init_fee_vault`. Other currencies have no fee vault: no fee is ever charged in them |
@@ -148,8 +148,8 @@ interface SettlementAdapter {
 | `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, `Config.fee_mint`) before the listing's first settlement or deal |
 | `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint` (see 3.4) |
-| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` |
-| `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges the fee on the fee-mint leg, accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
+| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; stores the current `fee_bps`/`cashback_bps` on the deal; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` (with the stored rates) |
+| `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges the fee on the fee-mint leg at the rates stored on the deal (not the current ones), accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
 | `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
 | `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault; reverts while `listing.cashback_frozen` (`CashbackFrozen`) |
@@ -314,12 +314,14 @@ bilateral deal (OTC / block trade / counteroffers):
   signs and delivers its side **directly** from its own accounts (no
   delegate); the vault is released by the `Deal` PDA.
 - **Execution** (`accept_deal`, one instruction, atomic), with the same math
-  as `settle` (§3.4) and the fee in force at acceptance, applied to the
+  as `settle` (§3.4) and the rates stored on the deal at `open_deal`
+  (`deal.fee_bps`, `deal.cashback_bps`), applied to the
   **USDT leg** (`usdt_amount` = `payment_amount`, or `asset_amount` when the
   currency sold is USDT): `fee = ceil(usdt_amount × fee_bps / 10_000)`, the
   USDT receiver's share `usdt_amount − fee > 0` required
-  (`ZeroSellerProceeds`, also checked at `open_deal` with the fee in force
-  then), cashback by `listing.cashback_eligible`. Two legs, each moved in full
+  (`ZeroSellerProceeds`, checked at `open_deal`; since the rates cannot change
+  afterwards, a deal that opens can always pay its fee), cashback by
+  `listing.cashback_eligible`. Two legs, each moved in full
   except that the USDT leg is split between its receiver and the fee vault:
   - **escrowed leg**: vault → counterparty (deposit, minus `fee` if it is the
     USDT leg, plus any `vault_excess`); vault → fee vault (`fee`, if USDT leg).
@@ -348,12 +350,18 @@ bilateral deal (OTC / block trade / counteroffers):
   can be neither accepted nor refunded again (the vault is closed at that
   point, so the account checks already fail), and the same `deal_id` cannot be
   reopened by the same proposer. No `SettlementRecord` is involved. The
-  proposer pays the deal's rent (~0.0023 SOL: 196 bytes + account overhead)
+  proposer pays the deal's rent (~0.0023 SOL: 200 bytes + account overhead)
   for good and gets the vault's rent back.
-- **Fee changes.** The fee is read at acceptance, as in `settle`. A fee
-  change is timelocked and capped at `MAX_FEE_BPS`, and the proposer can
-  cancel at any time while the deal is open.
-- **Events.** `DealOpened`, `DealExecuted` (with `fee_mint`, `fee`,
+- **The fee is part of the agreed terms.** `open_deal` copies `fee_bps` and
+  `cashback_bps` from `Config` onto the deal and `accept_deal` charges those,
+  so a timelocked fee or cashback change executed while the deal is open does
+  not affect it: both parties agreed on a net amount, and the counterparty
+  sees the rates in the `Deal` account (and in `DealOpened`) before it
+  accepts. Deals opened after the change use the new rates. (In order-book
+  mode the fee is read at `settle`; there are no stored terms to keep.) The
+  fee *mint* is not snapshotted: after a fee-mint switch a deal in the old
+  mint can only be refunded (§3.4).
+- **Events.** `DealOpened` (with `fee_bps` and `cashback_bps`), `DealExecuted` (with `fee_mint`, `fee`,
   `cashback` and `vault_excess`; same accounting as `Settled`), `DealCancelled`,
   `DealExpired`.
 
@@ -486,8 +494,11 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   and BRL paid in USDT; USDT sold for BRL) × side × token program
   combination, the expiry boundary, replays, pause and listing status
   (blocking open/accept, never cancel/expire), every authorization and
-  account check, deals without a USDT leg, and tokens sent straight into a
-  deal vault. The invariant
+  account check, deals without a USDT leg, tokens sent straight into a
+  deal vault, and the fee snapshot (a fee or cashback change, up or down,
+  executed while a deal is open does not apply to it; a deal opened at fee 0
+  still executes after a raise; deals opened afterwards get the new rates).
+  The invariant
   fuzzer mixes random deals into the sequences above: one proposer /
   counterparty pair per P2P pair (six valid markets: bond and credit paid in
   USD, and BRL/EUR against USD in both directions, so the fee sits on the
@@ -498,7 +509,10 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   `cancel_deal` and `expire_deal` on tracked deals (wrong signers, a crank
   naming its own refund account, replays of resolved deals) and donations
   into deal vaults. The outcome of every escrow call is predicted exactly
-  from the model (status, pause, listings, clock, fee), so invariant 7 and the
+  from the model (status, pause, listings, clock, and the fee rates recorded
+  at open, checked against the `Deal` account and `DealOpened`; fee changes
+  are interleaved, and a deal that opened must always be able to pay its
+  fee), so invariant 7 and the
   pause principle are checked on every call; invariant 6 is checked after
   every step by modelling every party's balances (a deposit stranded or paid
   twice breaks the model), requiring each open deal's vault to hold exactly

@@ -66,12 +66,20 @@ fn snapshot(env: &Env, p: &P2p, id: [u8; 16]) -> Snapshot {
     }
 }
 
-fn set_fee(env: &mut Env, fee_bps: u16) {
+/// Applies `changes` through the timelock.
+fn apply_changes(env: &mut Env, changes: &[ConfigChange]) {
     let admin = env.admin.insecure_clone();
-    let change = ConfigChange::FeeBps(fee_bps);
-    env.propose(&admin, change).unwrap();
+    for change in changes {
+        env.propose(&admin, *change).unwrap();
+    }
     env.warp_secs(TIMELOCK_SECS);
-    env.execute(&admin, &change).unwrap();
+    for change in changes {
+        env.execute(&admin, change).unwrap();
+    }
+}
+
+fn set_fee(env: &mut Env, fee_bps: u16) {
+    apply_changes(env, &[ConfigChange::FeeBps(fee_bps)]);
 }
 
 /// Swaps a mint's data for that of a Token-2022 mint carrying `extension`
@@ -178,6 +186,7 @@ fn assert_opens_and_executes(kind: Kind, asset_program: Pubkey, payment_program:
     assert_eq!((deal.asset_mint, deal.payment_mint), (p.asset_mint, p.payment_mint));
     assert_eq!((deal.asset_amount, deal.payment_amount), (asset_amount, payment_amount));
     assert_eq!(deal.proposer_side, side);
+    assert_eq!((deal.fee_bps, deal.cashback_bps), (FEE_BPS, CASHBACK_BPS));
     assert_eq!(deal.expires_at, expires_at);
     assert_eq!(deal.status, DealStatus::Open);
     assert_eq!((deal.opened_at, deal.resolved_at), (env.now(), 0));
@@ -195,6 +204,7 @@ fn assert_opens_and_executes(kind: Kind, asset_program: Pubkey, payment_program:
         (e.proposer_side, e.asset_amount, e.payment_amount),
         (side, asset_amount, payment_amount)
     );
+    assert_eq!((e.fee_bps, e.cashback_bps), (FEE_BPS, CASHBACK_BPS));
     assert_eq!(e.expires_at, expires_at);
 
     // accept_deal: both legs, the fee and the cashback in one instruction.
@@ -370,16 +380,66 @@ fn deal_with_token_2022_metadata_mints() {
     }
 }
 
-/// The fee is the one in force at `accept_deal`, not at `open_deal`. Changes
-/// are timelocked and capped at 1%, and the proposer can cancel while open.
+/// The fee is part of the agreed terms: `accept_deal` charges the fee and
+/// cashback rates stored at `open_deal`, whatever the config says by then. A
+/// deal opened after the change gets the new rates.
 #[test]
-fn fee_is_charged_at_accept_time() {
-    let (mut env, p) = open_market(AssetClass::FixedIncome, DealSide::Sell);
-    set_fee(&mut env, 100);
+fn fee_is_fixed_at_open() {
+    for side in SIDES {
+        let (mut env, p) = open_market(AssetClass::FixedIncome, side);
+        let (new_fee, new_cashback) = (100, 5_000);
+        apply_changes(
+            &mut env,
+            &[ConfigChange::FeeBps(new_fee), ConfigChange::CashbackBps(new_cashback)],
+        );
+        let ledger = cashback_pda(&p.asset_mint, &env.fee_mint);
+
+        // Deal 1, opened before the change: the old rates.
+        let deal = env.fetch_deal(&p.deal(deal_id(1)));
+        assert_eq!((deal.fee_bps, deal.cashback_bps), (FEE_BPS, CASHBACK_BPS));
+        let before = snapshot(&env, &p, deal_id(1));
+        let meta = env.accept_deal(&p, deal_id(1)).unwrap();
+        let fee = expected_fee(PAYMENT, FEE_BPS);
+        let cashback = expected_cashback(fee, true);
+        let e = &events::<DealExecuted>(&meta)[0];
+        assert_eq!((e.fee, e.cashback), (fee, cashback));
+        let after = snapshot(&env, &p, deal_id(1));
+        assert_eq!(after.fee_vault, before.fee_vault + fee);
+        assert_eq!(after.cashback, before.cashback + cashback);
+        let seller_payment = match side {
+            DealSide::Sell => after.proposer_payment,
+            DealSide::Buy => after.counterparty_payment,
+        };
+        assert_eq!(seller_payment, P2P_PAYMENT + PAYMENT - fee);
+
+        // Deal 2, opened after the change: the new rates.
+        let meta = env
+            .open_deal(&p, deal_id(2), side, ASSETS, PAYMENT)
+            .unwrap();
+        let o = &events::<DealOpened>(&meta)[0];
+        assert_eq!((o.fee_bps, o.cashback_bps), (new_fee, new_cashback));
+        let deal = env.fetch_deal(&p.deal(deal_id(2)));
+        assert_eq!((deal.fee_bps, deal.cashback_bps), (new_fee, new_cashback));
+        let meta = env.accept_deal(&p, deal_id(2)).unwrap();
+        let fee2 = expected_fee(PAYMENT, new_fee);
+        let cashback2 = fee2 * new_cashback as u64 / BPS_DENOMINATOR as u64;
+        let e = &events::<DealExecuted>(&meta)[0];
+        assert_eq!((e.fee, e.cashback), (fee2, cashback2));
+        let ledger_total = env.fetch::<CashbackLedger>(&ledger).accrued;
+        assert_eq!(ledger_total, cashback + cashback2);
+        let fees = env.fee_ledger(&env.fee_mint);
+        assert_eq!(fees.fees_collected, fee + fee2);
+        env.assert_vault_matches_ledger(&env.fee_mint);
+    }
+}
+
+/// A fee cut after open does not lower the fee either.
+#[test]
+fn fee_cut_after_open_does_not_apply() {
+    let (mut env, p) = open_market(AssetClass::Credit, DealSide::Buy);
+    set_fee(&mut env, 0);
     let meta = env.accept_deal(&p, deal_id(1)).unwrap();
-    let fee = expected_fee(PAYMENT, 100);
-    assert_eq!(events::<DealExecuted>(&meta)[0].fee, fee);
-    assert_eq!(env.balance(&p.proposer_payment), P2P_PAYMENT + PAYMENT - fee);
+    assert_eq!(events::<DealExecuted>(&meta)[0].fee, expected_fee(PAYMENT, FEE_BPS));
 }
 
 #[test]
@@ -810,24 +870,25 @@ fn counterparty_must_be_named_and_different() {
     assert_custom_err(res, ExchangeError::InvalidAddress);
 }
 
-/// 30 bps of 1 rounds up to a fee of 1: the seller would get nothing. Checked
-/// at open (current fee) and again at accept (fee in force then).
+/// 30 bps of 1 rounds up to a fee of 1: the seller would get nothing, so
+/// `open_deal` rejects it. The check is final: a deal opened at fee 0 keeps
+/// that fee, so a later fee raise cannot make it fail at accept.
 #[test]
 fn rejects_deal_that_leaves_the_seller_nothing() {
     let mut env = Env::initialized();
     let p = env.p2p(AssetClass::FixedIncome, SPL_TOKEN, SPL_TOKEN);
+    let before = snapshot(&env, &p, deal_id(1));
     let res = env.open_deal(&p, deal_id(1), DealSide::Sell, ASSETS, 1);
     assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
+    assert_untouched(&env, &p, deal_id(1), before, None);
 
     set_fee(&mut env, 0);
     env.open_deal(&p, deal_id(1), DealSide::Sell, ASSETS, 1)
         .unwrap();
     set_fee(&mut env, FEE_BPS);
-    let before = snapshot(&env, &p, deal_id(1));
-    let res = env.accept_deal(&p, deal_id(1));
-    assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
-    assert_untouched(&env, &p, deal_id(1), before, Some(DealStatus::Open));
-    env.cancel_deal(&p, deal_id(1)).unwrap();
+    let meta = env.accept_deal(&p, deal_id(1)).unwrap();
+    assert_eq!(events::<DealExecuted>(&meta)[0].fee, 0);
+    assert_eq!(env.balance(&p.proposer_payment), P2P_PAYMENT + 1);
 }
 
 #[test]

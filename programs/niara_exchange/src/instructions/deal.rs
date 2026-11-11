@@ -124,13 +124,15 @@ pub fn handle_open_deal(
         &accounts.asset_mint.key(),
         &accounts.payment_mint.key(),
     )?;
-    // Fail early on a deal that could not execute at the current fee
-    // (`accept_deal` re-checks with the fee in force then).
+    // The fee is part of the agreed terms: snapshot the rates now, and reject
+    // a deal whose USDT receiver would get nothing at them.
+    let fee_bps = accounts.config.fee_bps;
+    let cashback_bps = accounts.config.cashback_bps;
     fee_split(
         fee_leg,
         terms.asset_amount,
         terms.payment_amount,
-        &accounts.config,
+        (fee_bps, cashback_bps),
         accounts.asset_listing.cashback_eligible,
     )?;
 
@@ -184,6 +186,8 @@ pub fn handle_open_deal(
         payment_mint: accounts.payment_mint.key(),
         asset_amount: terms.asset_amount,
         payment_amount: terms.payment_amount,
+        fee_bps,
+        cashback_bps,
         proposer_side: terms.proposer_side,
         expires_at,
         status: DealStatus::Open,
@@ -203,6 +207,8 @@ pub fn handle_open_deal(
         proposer_side: deal.proposer_side,
         asset_amount: deal.asset_amount,
         payment_amount: deal.payment_amount,
+        fee_bps,
+        cashback_bps,
         expires_at,
     });
     Ok(())
@@ -333,11 +339,12 @@ pub fn handle_accept_deal(ctx: Context<AcceptDeal>) -> Result<()> {
         &accounts.asset_mint.key(),
         &accounts.payment_mint.key(),
     )?;
+    // The rates fixed at open, not the current ones (spec §3.5).
     let split = fee_split(
         fee_leg,
         deal.asset_amount,
         deal.payment_amount,
-        &accounts.config,
+        (deal.fee_bps, deal.cashback_bps),
         asset_listing.cashback_eligible,
     )?;
 
@@ -654,24 +661,20 @@ fn require_p2p_market(
 /// The fee on the USDT leg (spec §3.4): `fee = ceil(usdt_amount × fee_bps)`,
 /// and the receiver of that leg must still get something
 /// (`ZeroSellerProceeds`). Cashback only for eligible listings, whose USDT
-/// leg is always the payment.
+/// leg is always the payment. The rates are `(fee_bps, cashback_bps)` as
+/// fixed on the deal.
 fn fee_split(
     fee_leg: FeeLeg,
     asset_amount: u64,
     payment_amount: u64,
-    config: &Config,
+    (fee_bps, cashback_bps): (u16, u16),
     cashback_eligible: bool,
 ) -> Result<PaymentSplit> {
     let usdt_amount = match fee_leg {
         FeeLeg::Asset => asset_amount,
         FeeLeg::Payment => payment_amount,
     };
-    let split = split_payment(
-        usdt_amount,
-        config.fee_bps,
-        config.cashback_bps,
-        cashback_eligible,
-    )?;
+    let split = split_payment(usdt_amount, fee_bps, cashback_bps, cashback_eligible)?;
     require!(split.seller_receives > 0, ExchangeError::ZeroSellerProceeds);
     Ok(split)
 }

@@ -143,7 +143,8 @@ pub struct TokensBurned {
 }
 
 /// The proposer escrowed its side of a P2P deal (`asset_amount` if selling,
-/// `payment_amount` if buying).
+/// `payment_amount` if buying). `fee_bps` and `cashback_bps` are the rates
+/// fixed for this deal (the config's at open), charged on execution.
 #[event]
 pub struct DealOpened {
     pub deal: Pubkey,
@@ -155,6 +156,8 @@ pub struct DealOpened {
     pub proposer_side: DealSide,
     pub asset_amount: u64,
     pub payment_amount: u64,
+    pub fee_bps: u16,
+    pub cashback_bps: u16,
     pub expires_at: i64,
 }
 

@@ -34,6 +34,19 @@ PROPTEST_CASES=256 cargo test --test test_invariants   # longer fuzzing run
 Always build with `scripts/build.sh` before `cargo test`: tests load the `.so`
 from `target/deploy`, and the script fails instead of leaving a stale binary.
 
+## Machine limits
+
+The dev machine has 8 GB RAM and WSL gets about 4.8 GB. Going over it gets the
+whole WSL session killed by the OOM killer (exit 137).
+
+- **One heavy process at a time**: never run `npm install`, `anchor build`
+  (`scripts/build.sh`) and `cargo test` concurrently, and never in the
+  background. Start one, wait for it to finish, then start the next.
+- `cargo test` always with `--test-threads=1`
+  (`cargo test ... -- --test-threads=1`).
+- cargo `jobs = 2` (set in `~/.cargo/config.toml`); do not raise it.
+- rust-analyzer is disabled on purpose; do not re-enable it.
+
 ## Rules
 
 - **Never commit keypairs** or any secret: no `*-keypair.json`, `id.json`,

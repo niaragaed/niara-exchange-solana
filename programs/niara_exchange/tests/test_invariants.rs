@@ -213,6 +213,12 @@ struct TrackedDeal {
     excess: u64,
 }
 
+/// The largest fee the program may ever charge on `amount`: `MAX_FEE_BPS`
+/// (0.5%) of it, rounded up.
+fn max_fee(amount: u64) -> u64 {
+    (u128::from(amount) * u128::from(MAX_FEE_BPS)).div_ceil(u128::from(BPS_DENOMINATOR)) as u64
+}
+
 /// Listings with an issuer, so with Niara-approved issuance.
 const ISSUER_LISTINGS: [usize; 4] = [E0, E1, FI, CR];
 
@@ -959,6 +965,8 @@ impl World {
         )
         .unwrap();
         prop_assert_eq!((e.fee, e.cashback), (expected.fee, expected.cashback));
+        // Invariant 5 on the amount charged: at most 0.5%, rounded up.
+        prop_assert!(e.fee <= max_fee(payment), "fee {} of {}", e.fee, payment);
         prop_assert_eq!(e.payment_amount, payment);
         prop_assert_eq!(e.asset_amount, assets);
 
@@ -1184,6 +1192,8 @@ impl World {
         prop_assert_eq!((e.fee_bps, e.cashback_bps), rates);
         let deal = self.env.fetch_deal(&deal_key);
         prop_assert_eq!((deal.fee_bps, deal.cashback_bps), rates);
+        // Invariant 5: a deal never stores a fee above the cap.
+        prop_assert!(deal.fee_bps <= MAX_FEE_BPS, "deal fee_bps {}", deal.fee_bps);
 
         let deposit = if sell { assets } else { payment };
         let account = self.deal_parties[pair].deposit_account(side);
@@ -1465,7 +1475,7 @@ impl World {
     }
 
     fn check_invariants(&self) -> Result<(), TestCaseError> {
-        // Invariant 5.
+        // Invariant 5: the fee never exceeds the cap (50 bps, 0.5%).
         let config = self.config();
         prop_assert!(config.fee_bps <= MAX_FEE_BPS, "fee_bps {}", config.fee_bps);
         prop_assert!(config.cashback_bps <= BPS_DENOMINATOR);

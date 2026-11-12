@@ -49,6 +49,8 @@ import type { Ctx } from "./common.ts";
 const TIMELOCK_SECS = 60;
 /** Defaults for initialize_config; --fee-bps and --cashback-bps override them. */
 const DEFAULT_FEE_BPS = 50; // 0.5% of the USDT leg
+/** The program's MAX_FEE_BPS: initialize_config fails with FeeTooHigh above it. */
+const MAX_FEE_BPS = 50;
 const DEFAULT_CASHBACK_BPS = 2000; // 20% of the fee goes to the issuer
 const MOCK_DECIMALS = 6;
 const ROLE_LAMPORTS = 0.05 * LAMPORTS_PER_SOL;
@@ -129,7 +131,7 @@ async function ensureCurrencyListing(ctx: Ctx, listingAuthority: Keypair, mint: 
 }
 
 async function main(): Promise<void> {
-  const feeBps = intArg("fee-bps", 100);
+  const feeBps = intArg("fee-bps", MAX_FEE_BPS);
   const cashbackBps = intArg("cashback-bps", 10_000);
   const funderSol = Number(args["funder-sol"]);
   if (!(funderSol >= 0 && funderSol <= 5)) fail("--funder-sol must be between 0 and 5");

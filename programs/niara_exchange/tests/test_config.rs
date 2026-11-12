@@ -84,6 +84,41 @@ fn initialize_config_validates_params() {
     assert_eq!(env.fetch::<Config>(&config_pda()).fee_mint, env.fee_mint);
 }
 
+/// Business rule: Niara charges at most 0.5%. The cap is 50 bps on both ways
+/// of setting the fee, `initialize_config` and the timelock, and nothing
+/// above it is ever stored.
+#[test]
+fn fee_cap_is_half_a_percent() {
+    assert_eq!(MAX_FEE_BPS, 50);
+
+    let mut env = Env::deployed();
+    let admin = env.admin.insecure_clone();
+    for too_high in [51, 100, 10_000, u16::MAX] {
+        let mut p = env.default_params();
+        p.fee_bps = too_high;
+        assert_custom_err(env.initialize_config(&admin, p), ExchangeError::FeeTooHigh);
+        assert!(!env.exists(&config_pda()), "no config created");
+    }
+    let mut p = env.default_params();
+    p.fee_bps = 50;
+    env.initialize_config(&admin, p).unwrap();
+    assert_eq!(env.fetch::<Config>(&config_pda()).fee_bps, 50);
+
+    for too_high in [51, 100, 10_000, u16::MAX] {
+        let change = ConfigChange::FeeBps(too_high);
+        assert_custom_err(env.propose(&admin, change), ExchangeError::FeeTooHigh);
+        assert!(!env.exists(&pending_pda(&change)), "no pending change created");
+    }
+    // Down and back up to the cap through the timelock.
+    for fee in [0, 50] {
+        let change = ConfigChange::FeeBps(fee);
+        env.propose(&admin, change).unwrap();
+        env.warp_secs(TIMELOCK_SECS);
+        env.execute(&admin, &change).unwrap();
+        assert_eq!(env.fetch::<Config>(&config_pda()).fee_bps, fee);
+    }
+}
+
 #[test]
 fn initialize_config_only_once() {
     let mut env = Env::initialized();
@@ -209,7 +244,7 @@ fn one_pending_change_per_kind() {
 
     env.propose(&admin, ConfigChange::FeeBps(40)).unwrap();
     // Same kind, different value: slot already taken.
-    assert!(env.propose(&admin, ConfigChange::FeeBps(60)).is_err());
+    assert!(env.propose(&admin, ConfigChange::FeeBps(45)).is_err());
     // Different kind: independent slot.
     env.propose(&admin, ConfigChange::CashbackBps(1_000)).unwrap();
 }
@@ -225,11 +260,11 @@ fn cancel_frees_the_slot() {
     assert!(!env.exists(&pending_pda(&change)));
     assert!(env.execute(&admin, &change).is_err(), "nothing left to execute");
 
-    let replacement = ConfigChange::FeeBps(60);
+    let replacement = ConfigChange::FeeBps(45);
     env.propose(&admin, replacement).unwrap();
     env.warp_secs(TIMELOCK_SECS);
     env.execute(&admin, &replacement).unwrap();
-    assert_eq!(env.fetch::<Config>(&config_pda()).fee_bps, 60);
+    assert_eq!(env.fetch::<Config>(&config_pda()).fee_bps, 45);
 }
 
 #[test]

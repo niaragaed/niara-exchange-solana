@@ -518,8 +518,11 @@ mod tests {
 
     #[test]
     fn change_validation() {
-        assert!(ConfigChange::FeeBps(MAX_FEE_BPS).validate().is_ok());
-        assert!(ConfigChange::FeeBps(MAX_FEE_BPS + 1).validate().is_err());
+        // Business rule: the fee is at most 0.5%.
+        assert_eq!(MAX_FEE_BPS, 50);
+        assert!(ConfigChange::FeeBps(50).validate().is_ok());
+        assert!(ConfigChange::FeeBps(51).validate().is_err());
+        assert!(ConfigChange::FeeBps(100).validate().is_err());
         assert!(ConfigChange::CashbackBps(BPS_DENOMINATOR).validate().is_ok());
         assert!(ConfigChange::CashbackBps(BPS_DENOMINATOR + 1).validate().is_err());
         assert!(ConfigChange::Admin(Pubkey::default()).validate().is_err());

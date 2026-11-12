@@ -9,9 +9,10 @@ pub const PENDING_SEED: &[u8] = b"pending";
 #[constant]
 pub const LISTING_SEED: &[u8] = b"listing";
 
-/// Hard cap on the protocol fee: 1% of the payment amount.
+/// Hard cap on the protocol fee: 0.5% of the fee-mint (USDT) leg. Business
+/// rule: Niara charges at most 0.5%.
 #[constant]
-pub const MAX_FEE_BPS: u16 = 100;
+pub const MAX_FEE_BPS: u16 = 50;
 
 #[constant]
 pub const BPS_DENOMINATOR: u16 = 10_000;

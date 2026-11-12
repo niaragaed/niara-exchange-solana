@@ -8,7 +8,7 @@ use anchor_spl::token_2022::spl_token_2022::extension::ExtensionType;
 use common::*;
 use niara_exchange::{
     error::ExchangeError, events::Settled, AssetClass, ConfigChange, SettlementRecord,
-    BPS_DENOMINATOR,
+    BPS_DENOMINATOR, MAX_FEE_BPS,
 };
 use solana_signer::Signer;
 
@@ -175,9 +175,9 @@ fn rejects_fill_that_leaves_the_seller_nothing() {
     assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
     assert_untouched(&env, &m, before, order_id(1));
 
-    // At the maximum fee (100 bps) the same holds: the fee is ceil(1%) = 1.
+    // At the maximum fee (50 bps) the same holds: the fee is ceil(0.5%) = 1.
     let admin = env.admin.insecure_clone();
-    let change = ConfigChange::FeeBps(100);
+    let change = ConfigChange::FeeBps(MAX_FEE_BPS);
     env.propose(&admin, change).unwrap();
     env.warp_secs(TIMELOCK_SECS);
     env.execute(&admin, &change).unwrap();

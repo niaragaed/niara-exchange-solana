@@ -49,7 +49,8 @@ A peer-to-peer tokenized securities exchange with **self-custody** and **curated
    charges a protocol fee in one currency, the **fee mint** (USDT, set in
    `Config`): the party that receives USDT pays the fee, out of the USDT it
    receives. A share of that fee is credited to the issuer (pull model), so
-   cashback is always in USDT too (§3.4).
+   cashback is always in USDT too (§3.4). **The fee is at most 0.5%**
+   (business rule), enforced on-chain as a hard cap.
 
 Accurate one-line description for pitches:
 **"Off-chain matching, atomic on-chain settlement, self-custody, curated listing."**
@@ -120,7 +121,7 @@ interface SettlementAdapter {
 
 | Account | Seeds | Fields |
 |---|---|---|
-| `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_mint` (the USDT mint: every fee and all cashback are in it, §3.4; set at `initialize_config`, changed only through the timelock), `fee_bps: u16` (≤ `MAX_FEE_BPS = 100`), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
+| `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_mint` (the USDT mint: every fee and all cashback are in it, §3.4; set at `initialize_config`, changed only through the timelock), `fee_bps: u16` (≤ `MAX_FEE_BPS = 50`, i.e. 0.5%; §3.4), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
 | `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `cashback_frozen: bool` (§9.5; false at creation), `bump` |
 | `IssuanceBatch` | `["batch", listing, batch_no]` (`batch_no` as `u64` LE) | `listing`, `batch_no`, `amount`, `recipient` (wallet), `doc_hash`, `status` (`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`. Never closed: the on-chain issuance record (§3.12) |
@@ -196,6 +197,12 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
   deals that is the seller (USDT is the payment). In a `Currency` deal it is
   whoever receives USDT: the seller when USDT is `payment_mint`, the buyer
   when USDT is the currency sold (`asset_mint`).
+- **How much.** At most **0.5%**: `fee_bps ≤ MAX_FEE_BPS = 50`. It is a
+  business rule (Niara charges at most 0.5%), enforced as a constant of the
+  program: `initialize_config` and `propose_change` reject a higher rate
+  (`FeeTooHigh`), `execute_change` re-validates it, and a deal stores the
+  rate of its `open_deal`, so no trade can ever be charged more. Raising the
+  cap takes a program upgrade, not a config change.
 - **Cashback** is a share of the fee, so it is in USDT too; only
   cashback-eligible listings (never `Currency`) accrue it.
 - **One fee vault, one fee ledger** (`["fee_vault", fee_mint]`,
@@ -545,7 +552,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
      `sweep_excess` moves them to the treasury, and **after a sweep it is
      strict equality**. Fuzzing tracks donations and checks
      `vault == unwithdrawn + unswept donations`
-  5. `fee_bps ≤ MAX_FEE_BPS` always, even after timelocked changes
+  5. `fee_bps ≤ MAX_FEE_BPS` (50 bps, 0.5%) always, even after timelocked
+     changes; fuzzing also checks it on every fee charged
+     (`fee ≤ ceil(0.5% × amount)`) and on the rate stored in every deal
   6. an escrowed deposit always ends in exactly one place: counterparty (executed)
      or proposer (cancelled/expired). It is never stranded and never paid twice
   7. no `accept_deal` after `expires_at`; no `expire_deal` before it
@@ -741,6 +750,8 @@ Aligned on both chains:
   `fee = ceil(usdt_amount × fee_bps / 10 000)`, so a non-zero rate never yields a zero
   fee, and both reject a trade whose USDT receiver would get nothing (EVM is being
   changed from `floor` to match);
+- **fee cap 0.5%** (business rule, §3.4): `fee_bps ≤ 50` on both chains. Solana:
+  `MAX_FEE_BPS = 50`; the EVM cap must be set to the same value;
 - **P2P escrow** (§3.5; EVM `P2PEscrow`): the same asset classes
   (`FixedIncome`/`Credit`/`Currency`, never `Equity`); a named counterparty (no open
   offers); expiry at most 30 days ahead; `fee_bps` and `cashback_bps` snapshotted on the

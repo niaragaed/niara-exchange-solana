@@ -10,7 +10,7 @@ use niara_exchange::{
     error::ExchangeError,
     events::{DealCancelled, DealExecuted, DealExpired, DealOpened},
     AssetClass, CashbackLedger, ConfigChange, DealSide, DealStatus, BPS_DENOMINATOR,
-    MAX_DEAL_DURATION_SECS,
+    MAX_DEAL_DURATION_SECS, MAX_FEE_BPS,
 };
 use solana_signer::Signer;
 
@@ -387,7 +387,8 @@ fn deal_with_token_2022_metadata_mints() {
 fn fee_is_fixed_at_open() {
     for side in SIDES {
         let (mut env, p) = open_market(AssetClass::FixedIncome, side);
-        let (new_fee, new_cashback) = (100, 5_000);
+        // A raise to the maximum fee (50 bps).
+        let (new_fee, new_cashback) = (MAX_FEE_BPS, 5_000);
         apply_changes(
             &mut env,
             &[ConfigChange::FeeBps(new_fee), ConfigChange::CashbackBps(new_cashback)],

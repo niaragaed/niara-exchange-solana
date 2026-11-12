@@ -89,21 +89,25 @@ mod tests {
             split(10_001, 0, 10_000),
             PaymentSplit { fee: 0, cashback: 0, seller_receives: 10_001 }
         );
-        // Full cashback share.
-        assert_eq!(split(1_000_000, 100, 10_000).cashback, 10_000);
+        // Full cashback share, at the maximum fee (50 bps).
+        assert_eq!(
+            split(1_000_000, MAX_FEE_BPS, 10_000),
+            PaymentSplit { fee: 5_000, cashback: 5_000, seller_receives: 995_000 }
+        );
     }
 
     #[test]
     fn not_eligible_means_no_cashback() {
-        let s = split_payment(1_000_000, 100, 10_000, false).unwrap();
-        assert_eq!(s.fee, 10_000);
+        let s = split_payment(1_000_000, MAX_FEE_BPS, 10_000, false).unwrap();
+        assert_eq!(s.fee, 5_000);
         assert_eq!(s.cashback, 0);
     }
 
     #[test]
     fn max_amount_does_not_overflow() {
         let s = split(u64::MAX, MAX_FEE_BPS, 10_000);
-        assert_eq!(s.fee, u64::MAX / 100 + 1);
+        // ceil(0.5%): u64::MAX is not a multiple of 200, so it rounds up.
+        assert_eq!(s.fee, u64::MAX / 200 + 1);
         assert_eq!(s.seller_receives + s.fee, u64::MAX);
     }
 

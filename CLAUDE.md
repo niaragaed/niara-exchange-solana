@@ -66,6 +66,10 @@ whole WSL session killed by the OOM killer (exit 137).
 - **One heavy process at a time**: never run `npm install`, `anchor build`
   (`scripts/build.sh`) and `cargo test` concurrently, and never in the
   background. Start one, wait for it to finish, then start the next.
+- **Always stop local validators and background node processes when a
+  rehearsal ends; check `ps` before any build.** A leftover
+  `solana-test-validator` (about 500 MB) or a stray `node` script is enough
+  to push a build over the limit.
 - `cargo test` always with `--test-threads=1`
   (`cargo test ... -- --test-threads=1`).
 - cargo `jobs = 2` (set in `~/.cargo/config.toml`); do not raise it.

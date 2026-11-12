@@ -374,7 +374,7 @@ fn deal_with_token_2022_metadata_mints() {
         .unwrap();
     let p = env.p2p_parties(asset_mint, payment_mint, issuer);
     for (n, side) in SIDES.into_iter().enumerate() {
-        let id = deal_id(n as u128);
+        let id = deal_id(n as u128 + 1);
         env.open_deal(&p, id, side, ASSETS, PAYMENT).unwrap();
         env.accept_deal(&p, id).unwrap();
     }
@@ -852,6 +852,41 @@ fn rejects_zero_amounts() {
         }
     }
     assert_untouched(&env, &p, deal_id(1), before, None);
+}
+
+/// An all-zero deal id is an unset field, never a real negotiation UUID:
+/// `open_deal` refuses it and creates neither the deal nor its vault.
+#[test]
+fn rejects_zero_deal_id() {
+    let mut env = Env::initialized();
+    let p = env.p2p(AssetClass::FixedIncome, SPL_TOKEN, SPL_TOKEN);
+    let zero = [0u8; 16];
+    assert_eq!(deal_id(0), zero);
+    let before = snapshot(&env, &p, zero);
+    for side in SIDES {
+        let res = env.open_deal(&p, zero, side, ASSETS, PAYMENT);
+        assert_custom_err(res, ExchangeError::ZeroDealId);
+    }
+    assert_untouched(&env, &p, zero, before, None);
+    assert!(!env.exists(&p.vault(zero)), "no deal vault");
+
+    // The pause is checked first, as for every other rejection.
+    let admin = env.admin.insecure_clone();
+    env.pause(&admin).unwrap();
+    let res = env.open_deal(&p, zero, DealSide::Sell, ASSETS, PAYMENT);
+    assert_custom_err(res, ExchangeError::Paused);
+    env.unpause(&admin).unwrap();
+    assert_untouched(&env, &p, zero, before, None);
+
+    // Only the all-zero id is refused: one set bit anywhere is a valid id.
+    let mut low = zero;
+    low[0] = 1;
+    let mut high = zero;
+    high[15] = 0x80;
+    for (id, side) in [(low, DealSide::Sell), (high, DealSide::Buy)] {
+        env.open_deal(&p, id, side, ASSETS, PAYMENT).unwrap();
+        env.accept_deal(&p, id).unwrap();
+    }
 }
 
 #[test]

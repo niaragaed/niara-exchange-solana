@@ -145,6 +145,8 @@ pub fn handle_settle(
 ) -> Result<()> {
     let accounts = &ctx.accounts;
     accounts.config.require_not_paused()?;
+    // An all-zero id is an unset field, never a real match UUID.
+    require!(order_id != [0u8; 16], ExchangeError::ZeroMatchId);
     require!(
         asset_amount > 0 && payment_amount > 0,
         ExchangeError::ZeroAmount

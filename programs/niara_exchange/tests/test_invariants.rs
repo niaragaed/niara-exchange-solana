@@ -32,6 +32,7 @@
 //! and out of the 30-day window, then `accept_deal`, `cancel_deal` and
 //! `expire_deal` on tracked deals (incl. wrong signers, a crank redirecting
 //! the refund, replays of resolved deals) and donations into deal vaults.
+//! A zero match id never settles and a zero deal id never opens.
 //! The outcome of every escrow call is predicted exactly; the balances of
 //! every deal party are modelled, so a deposit that is stranded or paid twice
 //! fails the run, and each vault must hold exactly its deposit while the deal
@@ -132,6 +133,7 @@ static DEAL_EXPIRE_OK: AtomicU64 = AtomicU64::new(0);
 static DEAL_REFUND_REJECTED: AtomicU64 = AtomicU64::new(0);
 static FREEZE_CHANGES: AtomicU64 = AtomicU64::new(0);
 static FROZEN_WITHDRAW_REJECTED: AtomicU64 = AtomicU64::new(0);
+static ZERO_ID_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum StatusOp {
@@ -142,7 +144,8 @@ enum StatusOp {
 
 #[derive(Clone, Debug)]
 enum Action {
-    /// `id` comes from a small space (128) so replays still happen.
+    /// `id` comes from a small space (128) so replays still happen; 0 is the
+    /// all-zero match id, which never settles.
     Settle {
         pair: usize,
         assets: u64,
@@ -180,7 +183,8 @@ enum Action {
     ResolveIssuance { listing: usize, approve: bool, intruder: bool },
     /// The listing's holder burns `permille` of its balance (above 1000 overdraws).
     Burn { listing: usize, permille: u16, redemption: bool },
-    /// `id` comes from a small space (32) so reopened ids still happen.
+    /// `id` comes from a small space (32) so reopened ids still happen; 0 is
+    /// the all-zero deal id, which never opens.
     OpenDeal { pair: usize, sell: bool, assets: u64, payment: u64, ttl: i64, id: u8 },
     /// `deal` picks a tracked deal (mostly an open one).
     AcceptDeal { deal: usize, intruder: bool },
@@ -220,7 +224,8 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(0u64),
     ];
     let assets = prop_oneof![12 => 1u64..1_000, 1 => Just(0u64)];
-    let settle = (pair, assets, payment, 0u8..128, prop::bool::weighted(0.05)).prop_map(
+    let settle_id = prop_oneof![15 => 1u8..128, 1 => Just(0u8)];
+    let settle = (pair, assets, payment, settle_id, prop::bool::weighted(0.05)).prop_map(
         |(pair, assets, payment, id, intruder)| Action::Settle {
             pair,
             assets,
@@ -283,7 +288,7 @@ fn action() -> impl Strategy<Value = Action> {
         prop_oneof![12 => 1u64..1_000, 1 => Just(0u64)],
         deal_payment,
         ttl,
-        0u8..32,
+        prop_oneof![15 => 1u8..32, 1 => Just(0u8)],
     )
         .prop_map(|(pair, sell, assets, payment, ttl, id)| Action::OpenDeal {
             pair,
@@ -918,6 +923,9 @@ impl World {
         let meta = match res {
             Err(_) => {
                 SETTLE_REJECTED.fetch_add(1, Relaxed);
+                if order == [0u8; 16] {
+                    ZERO_ID_REJECTED.fetch_add(1, Relaxed);
+                }
                 prop_assert_eq!(&before, &after, "failed settle moved funds");
                 prop_assert_eq!(self.env.exists(&settled_pda(&order)), record_existed);
                 return Ok(());
@@ -929,6 +937,7 @@ impl World {
         prop_assert!(!intruder, "settled by a non-operator");
         prop_assert!(!config.paused, "settled while paused");
         prop_assert!(!record_existed, "order_id settled twice");
+        prop_assert!(order != [0u8; 16], "settled a zero match id");
         prop_assert!(assets > 0 && payment > 0);
         // Invariant 3.
         prop_assert_eq!(asset_listing.status, ListingStatus::Approved);
@@ -1134,6 +1143,8 @@ impl World {
             && payment_listing.is_approved_currency()
             // Invariant 12: a USD leg whose receiver still gets something.
             && fee.is_some_and(|(_, split)| split.seller_receives > 0)
+            // A zero deal id never opens.
+            && id != [0u8; 16]
             && !existed;
 
         let p = &self.deal_parties[pair];
@@ -1154,6 +1165,9 @@ impl World {
         let meta = match res {
             Err(_) => {
                 DEAL_OPEN_REJECTED.fetch_add(1, Relaxed);
+                if id == [0u8; 16] {
+                    ZERO_ID_REJECTED.fetch_add(1, Relaxed);
+                }
                 prop_assert_eq!(self.env.exists(&deal_key), existed);
                 return Ok(());
             }
@@ -1597,13 +1611,15 @@ fn invariants_hold_under_random_instruction_sequences() {
     let r_rejected = DEAL_REFUND_REJECTED.load(Relaxed);
     let (freezes, frozen_rejected) =
         (FREEZE_CHANGES.load(Relaxed), FROZEN_WITHDRAW_REJECTED.load(Relaxed));
+    let zero_ids = ZERO_ID_REJECTED.load(Relaxed);
     println!(
         "settle ok {ok} / rejected {rejected}; withdraw ok {w_ok} / rejected {w_rejected}; \
          sweep ok {s_ok} / rejected {s_rejected}; batches executed {issued}; \
          burns {burned}; config changes executed {changes}; \
          deals opened {o_ok} / rejected {o_rejected}; accepted {a_ok} / rejected {a_rejected}; \
          cancelled {cancelled}; expired {expired}; refunds rejected {r_rejected}; \
-         cashback freeze changes {freezes}; withdrawals stopped by a freeze {frozen_rejected}"
+         cashback freeze changes {freezes}; withdrawals stopped by a freeze {frozen_rejected}; \
+         zero ids rejected {zero_ids}"
     );
     // Not vacuous: both outcomes of every guarded path were exercised.
     assert!(ok > 0 && rejected > 0, "settle outcomes not exercised");
@@ -1617,6 +1633,7 @@ fn invariants_hold_under_random_instruction_sequences() {
         "refund outcomes not exercised"
     );
     assert!(freezes > 0 && frozen_rejected > 0, "cashback freeze not exercised");
+    assert!(zero_ids > 0, "zero match and deal ids not exercised");
 }
 
 /// Deterministic sweep of invariants 6 and 7: on every valid P2P pair and both
@@ -1625,7 +1642,8 @@ fn invariants_hold_under_random_instruction_sequences() {
 #[test]
 fn every_deposit_ends_in_exactly_one_place() {
     let mut world = World::new(TOKEN_2022);
-    let mut id = 0u8;
+    // Ids start at 1: a zero deal id never opens.
+    let mut id = 1u8;
     for pair in 0..DEAL_PAIRS.len() {
         for sell in [true, false] {
             for _ in 0..3 {

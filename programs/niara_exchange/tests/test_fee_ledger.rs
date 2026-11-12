@@ -153,7 +153,7 @@ fn settle_records_gross_fee_and_cashback() {
     let mut cashback = 0;
     // 2 is the smallest payment that leaves the seller something (fee 1).
     for (i, payment) in [2u64, 10_001, 25_000_000, 333_333].into_iter().enumerate() {
-        env.settle(&m, order_id(i as u128), 1, payment).unwrap();
+        env.settle(&m, order_id(i as u128 + 1), 1, payment).unwrap();
         fees += fee_of(payment);
         cashback += cashback_of(fee_of(payment));
         let ledger = env.fee_ledger(&m.payment_mint);

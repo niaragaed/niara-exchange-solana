@@ -147,8 +147,8 @@ interface SettlementAdapter {
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
 | `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, `Config.fee_mint`) before the listing's first settlement or deal |
-| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint` (see 3.4) |
-| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `now < expires_at ≤ now + 30 days`; stores the current `fee_bps`/`cashback_bps` on the deal; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` (with the stored rates) |
+| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint`; `order_id` (the match id) not all zeros (see 3.4) |
+| `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `deal_id` not all zeros (`ZeroDealId`); `now < expires_at ≤ now + 30 days`; stores the current `fee_bps`/`cashback_bps` on the deal; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` (with the stored rates) |
 | `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges the fee on the fee-mint leg at the rates stored on the deal (not the current ones), accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
 | `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
@@ -216,11 +216,14 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
 
 `order_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
 `matches.id` primary key), not the maker's order id: one order can be filled by
-several matches, and each match settles at most once. `payment_amount` is in
+several matches, and each match settles at most once. An all-zero id is
+rejected (`ZeroMatchId`): it is what an unset field looks like, never a real
+UUID, and the EVM `settle` rejects a zero `matchId` too (§4.2). `payment_amount` is in
 raw units of the payment mint; the program does no price conversion.
 
 Preconditions (all enforced on-chain):
 - `!config.paused`; signer is `config.settlement_operator`
+- `order_id != [0; 16]` (`ZeroMatchId`)
 - `asset_amount > 0`, `payment_amount > 0`
 - `buyer != seller`; neither is the vault authority
 - `["settled", order_id]` does not exist yet (replay guard: the operator
@@ -302,7 +305,8 @@ bilateral deal (OTC / block trade / counteroffers):
   the counterparty, which must not be the proposer (`SelfTrade`) or the
   default key (`InvalidAddress`); only that wallet can `accept_deal`
   (`Unauthorized`). `deal_id` is the 16-byte off-chain negotiation id, scoped
-  to the proposer (`["deal", proposer, deal_id]`).
+  to the proposer (`["deal", proposer, deal_id]`); an all-zero `deal_id` is
+  rejected (`ZeroDealId`), like a zero match id in `settle` (§3.4).
 - **Expiry.** `now < expires_at ≤ now + 30 days` at `open_deal`
   (`InvalidExpiry`, `MAX_DEAL_DURATION_SECS`). The deal is live while
   `now < expires_at` (`accept_deal` fails with `DealExpired` from
@@ -471,7 +475,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   drawn per case; BRL; EUR), plus a delegated buyer/seller pair for every
   asset × payment combination (including invalid ones), then runs random
   sequences of `settle` (valid and invalid markets, zero amounts, replayed
-  ids, wrong signer, fills that leave the seller nothing), listing status
+  and all-zero ids, wrong signer, fills that leave the seller nothing), listing status
   changes, pause/unpause, both withdrawals (incl. overdraws and wrong signers),
   timelocked fee/cashback changes with out-of-range values, re-delegations,
   `init_cashback_ledger`, donations straight into the fee vault and
@@ -505,7 +509,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   payment leg or on the asset leg; and nine invalid ones: no USD leg
   (bond/credit paid in BRL/EUR, BRL ↔ EUR), `Equity` asset, `Equity` or
   `FixedIncome` payment, same mint), `open_deal` with zero amounts, reused
-  ids and expiries in and out of the 30-day window, then `accept_deal`,
+  and all-zero ids and expiries in and out of the 30-day window, then `accept_deal`,
   `cancel_deal` and `expire_deal` on tracked deals (wrong signers, a crank
   naming its own refund account, replays of resolved deals) and donations
   into deal vaults. The outcome of every escrow call is predicted exactly

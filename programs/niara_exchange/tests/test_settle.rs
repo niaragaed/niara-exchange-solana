@@ -254,6 +254,35 @@ fn same_order_id_cannot_settle_twice() {
     env.settle(&m, order_id(8), ASSETS, PAYMENT).unwrap();
 }
 
+/// An all-zero match id is an unset field, never a real UUID: `settle` refuses
+/// it and records nothing for it.
+#[test]
+fn rejects_zero_match_id() {
+    let mut env = Env::initialized();
+    let m = env.market(SPL_TOKEN, SPL_TOKEN);
+    let zero = [0u8; 16];
+    assert_eq!(order_id(0), zero);
+    let before = snapshot(&env, &m);
+    let res = env.settle(&m, zero, ASSETS, PAYMENT);
+    assert_custom_err(res, ExchangeError::ZeroMatchId);
+    assert_untouched(&env, &m, before, zero);
+
+    // The pause is checked first, as for every other rejection.
+    let admin = env.admin.insecure_clone();
+    env.pause(&admin).unwrap();
+    assert_custom_err(env.settle(&m, zero, ASSETS, PAYMENT), ExchangeError::Paused);
+    env.unpause(&admin).unwrap();
+    assert_untouched(&env, &m, before, zero);
+
+    // Only the all-zero id is refused: one set bit anywhere is a valid id.
+    let mut low = zero;
+    low[0] = 1;
+    let mut high = zero;
+    high[15] = 0x80;
+    env.settle(&m, low, 1, 1_000).unwrap();
+    env.settle(&m, high, 1, 1_000).unwrap();
+}
+
 // ---- authorization and pause ------------------------------------------------
 
 #[test]

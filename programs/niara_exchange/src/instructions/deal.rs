@@ -96,6 +96,8 @@ pub fn handle_open_deal(
 ) -> Result<()> {
     let accounts = &ctx.accounts;
     accounts.config.require_not_paused()?;
+    // An all-zero id is an unset field, never a real negotiation UUID.
+    require!(deal_id != [0u8; 16], ExchangeError::ZeroDealId);
     require!(
         terms.asset_amount > 0 && terms.payment_amount > 0,
         ExchangeError::ZeroAmount

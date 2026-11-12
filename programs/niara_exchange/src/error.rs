@@ -104,4 +104,8 @@ pub enum ExchangeError {
     CashbackNotFrozen,
     #[msg("The trade needs a leg in the fee mint (USDT)")]
     NotFeeMint,
+    #[msg("The match id (order_id) must not be all zeros")]
+    ZeroMatchId,
+    #[msg("deal_id must not be all zeros")]
+    ZeroDealId,
 }

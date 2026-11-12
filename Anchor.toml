@@ -10,6 +10,9 @@ skip-lint = false
 [programs.localnet]
 niara_exchange = "B311xH3PcEx86gdRbuinrGrh1r9G2qzjDCji8uc6eD9v"
 
+[programs.devnet]
+niara_exchange = "B311xH3PcEx86gdRbuinrGrh1r9G2qzjDCji8uc6eD9v"
+
 [provider]
 cluster = "localnet"
 wallet = "~/.config/solana/id.json"

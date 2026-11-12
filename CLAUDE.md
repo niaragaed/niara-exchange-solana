@@ -20,6 +20,7 @@ copies; it proposes spec edits in its reports.
 | Solana CLI | **4.3.0** (Agave) | not in `[toolchain]` on purpose (it would switch the machine-wide release) |
 | Rust | **1.99.1** | `rust-toolchain.toml` (MSRV in `Cargo.toml`: 1.89) |
 | Tests | **LiteSVM 0.15** + **proptest 1** | `[dev-dependencies]`; `Cargo.lock` pins LiteSVM's dependency graph |
+| Scripts (setup, demo) | **Node ≥ 22.18** (runs `.ts` directly), **`@anchor-lang/core` 1.2.2**, `@solana/web3.js` 1.98.4, `@solana/spl-token` 0.4.15 | exact versions in `package.json`; `package-lock.json` is committed |
 
 `Cargo.lock` is committed and must keep resolving `anchor-lang 1.2.2`.
 
@@ -33,6 +34,29 @@ PROPTEST_CASES=256 cargo test --test test_invariants   # longer fuzzing run
 
 Always build with `scripts/build.sh` before `cargo test`: tests load the `.so`
 from `target/deploy`, and the script fails instead of leaving a stale binary.
+
+## Devnet preparation
+
+Runbook: `docs/devnet-deploy.md` (keys, program ID check, deploy, upgrade
+authority, setup, demo). Nothing is deployed without an explicit request.
+
+```bash
+bash scripts/check-program-id.sh   # declare_id!, Anchor.toml, keypair, backup and IDL agree
+npm ci --ignore-scripts            # once per clone
+npm run typecheck                  # needs a build: the scripts import target/types
+bash scripts/localnet-demo.sh      # setup + demo + safety checks on a throwaway local validator
+```
+
+- `scripts/setup.ts` and `scripts/demo.ts` take the cluster from `--cluster`
+  (default `localnet`) and verify it by genesis hash. They never read the
+  Solana CLI config (which points at devnet with the Register deployer) and
+  never airdrop.
+- Keys live outside the repo, in `~/.config/niara-exchange/<cluster>/`; the
+  scripts refuse a keys folder inside it.
+- When an instruction's accounts or arguments change, update the scripts and
+  run `scripts/localnet-demo.sh` before any devnet run.
+- `npm ci`, the typecheck and the local validator are heavy processes too
+  (see below).
 
 ## Machine limits
 

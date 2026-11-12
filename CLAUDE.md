@@ -27,9 +27,9 @@ copies; it proposes spec edits in its reports.
 ## Build and test
 
 ```bash
-bash scripts/build.sh              # anchor build + fresh-artifact check (.so and IDL)
-cargo test --no-fail-fast          # LiteSVM loads target/deploy/niara_exchange.so
-PROPTEST_CASES=256 cargo test --test test_invariants   # longer fuzzing run
+bash scripts/build.sh              # program binary, then IDL + types, with a fresh-artifact check
+bash scripts/mem-cap.sh cargo test --no-fail-fast -- --test-threads=1   # LiteSVM loads target/deploy/niara_exchange.so
+bash scripts/fuzz-long.sh          # 256-case invariant run, log in ~/fuzz-256.log
 ```
 
 Always build with `scripts/build.sh` before `cargo test`: tests load the `.so`
@@ -70,6 +70,14 @@ whole WSL session killed by the OOM killer (exit 137).
   rehearsal ends; check `ps` before any build.** A leftover
   `solana-test-validator` (about 500 MB) or a stray `node` script is enough
   to push a build over the limit.
+- **Never run a plain `anchor build`**: its IDL step compiles and links every
+  integration test and took WSL down twice. `scripts/build.sh` builds the
+  binary with `--no-idl` and the IDL with `anchor idl build -- --lib`
+  (about 1.6 GB at its peak).
+- **Run heavy commands through `scripts/mem-cap.sh`** (`bash scripts/mem-cap.sh
+  cargo test ...`): it caps the command at 3 GB of RAM plus 1 GB of swap, so
+  a run that grows too big is killed alone instead of taking WSL with it,
+  and it prints the peak. `scripts/build.sh` already uses it.
 - `cargo test` always with `--test-threads=1`
   (`cargo test ... -- --test-threads=1`).
 - cargo `jobs = 2` (set in `~/.cargo/config.toml`); do not raise it.

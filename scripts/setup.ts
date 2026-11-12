@@ -12,7 +12,7 @@
 //
 // Safe to run again: every step is skipped when its account already exists.
 //
-// Usage: node scripts/setup.ts [--cluster localnet|devnet] [--fee-bps 30]
+// Usage: node scripts/setup.ts [--cluster localnet|devnet] [--fee-bps 50]
 //                              [--cashback-bps 2000] [--funder-sol 0.5]
 //   NIARA_DEPLOYER   deployer keypair (default ~/.config/solana/niara-exchange-deployer.json)
 //   NIARA_KEYS_DIR   keys folder (default ~/.config/niara-exchange/<cluster>)
@@ -47,14 +47,17 @@ import type { Ctx } from "./common.ts";
 
 /** Spec §3.3: delay between propose_change and execute_change (the program's minimum). */
 const TIMELOCK_SECS = 60;
+/** Defaults for initialize_config; --fee-bps and --cashback-bps override them. */
+const DEFAULT_FEE_BPS = 50; // 0.5% of the USDT leg
+const DEFAULT_CASHBACK_BPS = 2000; // 20% of the fee goes to the issuer
 const MOCK_DECIMALS = 6;
 const ROLE_LAMPORTS = 0.05 * LAMPORTS_PER_SOL;
 
 const { values: args } = parseArgs({
   options: {
     cluster: { type: "string" },
-    "fee-bps": { type: "string", default: "30" },
-    "cashback-bps": { type: "string", default: "2000" },
+    "fee-bps": { type: "string", default: String(DEFAULT_FEE_BPS) },
+    "cashback-bps": { type: "string", default: String(DEFAULT_CASHBACK_BPS) },
     "funder-sol": { type: "string", default: "0.5" },
   },
 });

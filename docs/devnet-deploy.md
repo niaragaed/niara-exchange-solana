@@ -258,7 +258,7 @@ its upgrade authority, then:
    metadata, 6 decimals, no freeze authority: **"Niara Mock USDT (TEST)"**
    (`mockUSDT`) and **"Niara Mock BRL (TEST)"** (`mockBRL`);
 3. `initialize_config`: `fee_mint` = MockUSDT, timelock **60 s**,
-   `--fee-bps` (default 30) and `--cashback-bps` (default 2000, i.e. 20% of
+   `--fee-bps` (default 50, i.e. 0.5%) and `--cashback-bps` (default 2000, i.e. 20% of
    the fee);
 4. `init_fee_vault`;
 5. `list_currency` for MockUSDT and MockBRL.

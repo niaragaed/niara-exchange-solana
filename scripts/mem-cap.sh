@@ -3,7 +3,7 @@
 # is killed alone (exit 137 or 143) instead of taking the whole WSL session with it
 # (CLAUDE.md, Machine limits).
 #
-# The cap is a systemd scope (cgroup v2): NIARA_MEM_CAP of RAM (default 3G) plus
+# The cap is a systemd scope (cgroup v2): NIARA_MEM_CAP of RAM (default 2G) plus
 # NIARA_SWAP_CAP of swap (default 1G), for the command and all its children.
 # Prints the enforced limit at the start and the peak memory at the end.
 #
@@ -40,7 +40,7 @@ if [[ "${NIARA_MEM_CAP_ACTIVE:-}" == 1 ]]; then
   exit "$status"
 fi
 
-export NIARA_MEM_CAP="${NIARA_MEM_CAP:-3G}"
+export NIARA_MEM_CAP="${NIARA_MEM_CAP:-2G}"
 export NIARA_SWAP_CAP="${NIARA_SWAP_CAP:-1G}"
 
 if ! probe="$(systemd-run --user --scope --quiet -p MemoryMax=1G true 2>&1)"; then

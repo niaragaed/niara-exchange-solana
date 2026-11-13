@@ -75,7 +75,7 @@ whole WSL session killed by the OOM killer (exit 137).
   binary with `--no-idl` and the IDL with `anchor idl build -- --lib`
   (about 1.6 GB at its peak).
 - **Run heavy commands through `scripts/mem-cap.sh`** (`bash scripts/mem-cap.sh
-  cargo test ...`): it caps the command at 3 GB of RAM plus 1 GB of swap, so
+  cargo test ...`): it caps the command at 2 GB of RAM plus 1 GB of swap, so
   a run that grows too big is killed alone instead of taking WSL with it,
   and it prints the peak. `scripts/build.sh` already uses it.
 - `cargo test` always with `--test-threads=1`

@@ -179,27 +179,38 @@ impl AssetClass {
     }
 }
 
+/// Variants are only ever appended: the discriminant is stored on-chain.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
 pub enum ListingStatus {
     Pending,
     Approved,
     Suspended,
     Delisted,
+    /// Listing fee quoted, not paid yet (spec §3.13).
+    Quoted,
 }
 
 impl ListingStatus {
     /// Allowed transitions:
-    /// - `Pending | Suspended -> Approved`
+    /// - `Pending | Quoted -> Quoted` (`quote_listing`; re-quoting until paid)
+    /// - `Quoted -> Approved` (`pay_listing_fee` only)
+    /// - `Suspended -> Approved` (`approve_listing`, reinstatement)
     /// - `Approved -> Suspended`
-    /// - `Pending | Approved | Suspended -> Delisted` (terminal)
+    /// - `Pending | Quoted | Approved | Suspended -> Delisted` (terminal)
+    ///
+    /// `Pending -> Approved` is not allowed: an issuer listing is first
+    /// approved by paying its listing fee.
     pub fn can_transition_to(self, next: ListingStatus) -> bool {
         use ListingStatus::*;
         matches!(
             (self, next),
-            (Pending, Approved)
+            (Pending, Quoted)
+                | (Quoted, Quoted)
+                | (Quoted, Approved)
                 | (Suspended, Approved)
                 | (Approved, Suspended)
                 | (Pending, Delisted)
+                | (Quoted, Delisted)
                 | (Approved, Delisted)
                 | (Suspended, Delisted)
         )
@@ -234,6 +245,20 @@ pub struct Listing {
     /// for this listing, e.g. after an issuer key compromise (spec §9.5).
     /// Cashback keeps accruing while frozen.
     pub cashback_frozen: bool,
+    // ---- listing-fee quote (spec §3.13); all zero for `Currency` ----------
+    /// Issuer valuation in base units of `listing_fee_mint`. Public on-chain.
+    pub valuation: u64,
+    /// `1..=MAX_LISTING_FEE_BPS` once quoted.
+    pub listing_fee_bps: u16,
+    /// `ceil(valuation * listing_fee_bps / 10_000)`.
+    pub listing_fee: u64,
+    /// `Config.fee_mint` at `quote_listing`: the unit of `valuation` and
+    /// `listing_fee`, and the only mint `pay_listing_fee` accepts.
+    pub listing_fee_mint: Pubkey,
+    /// The quote can be paid while `now < quote_expires_at`.
+    pub quote_expires_at: i64,
+    /// 0 until `pay_listing_fee`, then `listing_fee` (invariant 13).
+    pub listing_fee_paid: u64,
     pub bump: u8,
 }
 
@@ -271,9 +296,12 @@ impl CashbackLedger {
 /// (normally one); a timelocked fee-mint switch leaves the old one
 /// withdrawable.
 ///
-/// `fees_collected` is the gross fee (protocol share + cashback). Derived:
-/// - protocol share accrued = `fees_collected - cashback_accrued`
-/// - unwithdrawn = `fees_collected - protocol_withdrawn - cashback_withdrawn`
+/// `fees_collected` is the gross trading fee (protocol share + cashback);
+/// `listing_fees_collected` is protocol revenue only. Derived:
+/// - protocol share accrued =
+///   `fees_collected - cashback_accrued + listing_fees_collected`
+/// - unwithdrawn =
+///   `fees_collected + listing_fees_collected - protocol_withdrawn - cashback_withdrawn`
 ///
 /// Invariant 4: the fee vault balance equals the unwithdrawn amount. Anyone
 /// can transfer tokens into the vault, so between sweeps it is `>=`; such
@@ -283,6 +311,7 @@ impl CashbackLedger {
 #[derive(InitSpace, Debug)]
 pub struct FeeLedger {
     pub payment_mint: Pubkey,
+    /// Trading fees (`settle`, `accept_deal`), cashback share included.
     pub fees_collected: u64,
     /// Sum of `CashbackLedger::accrued` over all listings, in this mint.
     pub cashback_accrued: u64,
@@ -291,6 +320,9 @@ pub struct FeeLedger {
     pub cashback_withdrawn: u64,
     pub bump: u8,
     pub vault_bump: u8,
+    /// Listing fees paid in this mint (`pay_listing_fee`, spec §3.13). No
+    /// cashback share. Appended last.
+    pub listing_fees_collected: u64,
 }
 
 impl FeeLedger {
@@ -308,10 +340,21 @@ impl FeeLedger {
         Ok(())
     }
 
-    /// Protocol share not yet withdrawn by the treasury.
+    /// Records one listing fee: protocol revenue, no cashback share.
+    pub fn record_listing_fee(&mut self, amount: u64) -> Result<()> {
+        self.listing_fees_collected = self
+            .listing_fees_collected
+            .checked_add(amount)
+            .ok_or(ExchangeError::MathOverflow)?;
+        Ok(())
+    }
+
+    /// Protocol share not yet withdrawn by the treasury: the trading fees'
+    /// protocol share plus every listing fee.
     pub fn protocol_available(&self) -> Result<u64> {
         self.fees_collected
             .checked_sub(self.cashback_accrued)
+            .and_then(|accrued| accrued.checked_add(self.listing_fees_collected))
             .and_then(|accrued| accrued.checked_sub(self.protocol_withdrawn))
             .ok_or_else(|| error!(ExchangeError::MathOverflow))
     }
@@ -319,7 +362,8 @@ impl FeeLedger {
     /// What the fee vault must hold (invariant 4).
     pub fn unwithdrawn(&self) -> Result<u64> {
         self.fees_collected
-            .checked_sub(self.protocol_withdrawn)
+            .checked_add(self.listing_fees_collected)
+            .and_then(|v| v.checked_sub(self.protocol_withdrawn))
             .and_then(|v| v.checked_sub(self.cashback_withdrawn))
             .ok_or_else(|| error!(ExchangeError::MathOverflow))
     }
@@ -461,12 +505,15 @@ mod tests {
 
     #[test]
     fn status_transitions() {
-        let all = [Pending, Approved, Suspended, Delisted];
+        let all = [Pending, Approved, Suspended, Delisted, Quoted];
         let allowed = [
-            (Pending, Approved),
+            (Pending, Quoted),
+            (Quoted, Quoted),
+            (Quoted, Approved),
             (Suspended, Approved),
             (Approved, Suspended),
             (Pending, Delisted),
+            (Quoted, Delisted),
             (Approved, Delisted),
             (Suspended, Delisted),
         ];
@@ -479,6 +526,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn quoted_is_appended_last() {
+        // The discriminant is stored in every Listing account.
+        assert_eq!(Quoted as u8, 4);
+        assert_eq!(Delisted as u8, 3);
+    }
+
+    #[test]
+    fn fee_ledger_counts_listing_fees_as_protocol_revenue() {
+        let mut ledger = FeeLedger {
+            payment_mint: Pubkey::new_unique(),
+            fees_collected: 0,
+            cashback_accrued: 0,
+            protocol_withdrawn: 0,
+            cashback_withdrawn: 0,
+            bump: 0,
+            vault_bump: 0,
+            listing_fees_collected: 0,
+        };
+        ledger.record_fee(1_000, 200).unwrap();
+        ledger.record_listing_fee(500).unwrap();
+        // Protocol: 1_000 - 200 trading share + 500 listing fee.
+        assert_eq!(ledger.protocol_available().unwrap(), 1_300);
+        assert_eq!(ledger.unwithdrawn().unwrap(), 1_500);
+        // Invariant 2 compares cashback with trading fees only.
+        assert_eq!((ledger.fees_collected, ledger.cashback_accrued), (1_000, 200));
+
+        ledger.protocol_withdrawn = 1_300;
+        ledger.cashback_withdrawn = 200;
+        assert_eq!(ledger.protocol_available().unwrap(), 0);
+        assert_eq!(ledger.unwithdrawn().unwrap(), 0);
+
+        ledger.listing_fees_collected = u64::MAX;
+        assert!(ledger.record_listing_fee(1).is_err());
     }
 
     #[test]

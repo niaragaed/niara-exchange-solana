@@ -366,8 +366,7 @@ fn deal_with_token_2022_metadata_mints() {
     env.set_mint_decimals(&asset_mint, ASSET_DECIMALS);
     env.submit_listing(&issuer, asset_mint, AssetClass::Credit, DOC_HASH)
         .unwrap();
-    let authority = env.listing_authority.insecure_clone();
-    env.approve(&authority, asset_mint).unwrap();
+    env.approve_paid(&issuer, asset_mint);
     let payment_mint = env.fee_currency(TOKEN_2022);
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
@@ -454,7 +453,8 @@ fn zero_fee_skips_the_fee_leg() {
     let e = &events::<DealExecuted>(&meta)[0];
     assert_eq!((e.fee, e.cashback), (0, 0));
     assert_eq!(env.balance(&p.counterparty_payment), P2P_PAYMENT + PAYMENT);
-    assert_eq!(env.balance(&fee_vault_pda(&p.payment_mint)), 0);
+    // Only the credit listing's fee is in the vault: the deal added nothing.
+    assert_eq!(env.balance(&fee_vault_pda(&p.payment_mint)), LISTING_FEE);
 }
 
 #[test]
@@ -465,11 +465,12 @@ fn cancel_refunds_the_proposer() {
         let vault_rent = env.lamports(&p.vault(id));
         let lamports = env.lamports(&p.proposer.pubkey());
         let meta = env.cancel_deal(&p, id).unwrap();
-        // Back where it started; the counterparty and the fee vault untouched.
+        // Back where it started; the counterparty and the fee vault untouched
+        // (it holds only the bond's listing fee).
         let s = snapshot(&env, &p, id);
         assert_eq!((s.proposer_asset, s.proposer_payment), (P2P_ASSETS, P2P_PAYMENT));
         assert_eq!((s.counterparty_asset, s.counterparty_payment), (P2P_ASSETS, P2P_PAYMENT));
-        assert_eq!((s.fee_vault, s.deal_vault, s.cashback), (0, 0, 0));
+        assert_eq!((s.fee_vault, s.deal_vault, s.cashback), (LISTING_FEE, 0, 0));
         assert!(!env.exists(&p.vault(id)));
         // Rent back, minus the fee of the proposer's own transaction.
         assert_eq!(env.lamports(&p.proposer.pubkey()), lamports + vault_rent - 5_000);
@@ -1003,6 +1004,9 @@ fn accept_accounts_must_match_the_deal() {
     let (mut env, p) = open_market(AssetClass::FixedIncome, DealSide::Sell);
     let id = deal_id(1);
     let counterparty = p.counterparty.insecure_clone();
+    // Created before the snapshot: approving it pays a listing fee into the
+    // fee vault.
+    let (other_asset, _) = env.listed_issuer_asset(SPL_TOKEN, AssetClass::FixedIncome);
     let before = snapshot(&env, &p, id);
 
     // Another proposer (with its own payment account).
@@ -1014,7 +1018,7 @@ fn accept_accounts_must_match_the_deal() {
     assert_custom_err(res, ExchangeError::DealAccountMismatch);
 
     // Another asset mint (with its own listing).
-    let (other, _) = env.listed_issuer_asset(SPL_TOKEN, AssetClass::FixedIncome);
+    let other = other_asset;
     let mut a = env.accept_deal_accounts(&p, id);
     a.asset_mint = other;
     a.asset_listing = listing_pda(&other);
@@ -1214,9 +1218,10 @@ fn vault_donations_never_strand_the_deposit() {
                 (_, DealSide::Sell) => assert_eq!(after.proposer_asset, P2P_ASSETS + 7),
                 (_, DealSide::Buy) => assert_eq!(after.proposer_payment, P2P_PAYMENT + 7),
             }
-            // The fee is unaffected by the excess.
+            // The fee is unaffected by the excess (the vault also holds the
+            // listing's fee).
             if exit == "accept" {
-                assert_eq!(after.fee_vault, fee);
+                assert_eq!(after.fee_vault, LISTING_FEE + fee);
                 env.assert_vault_matches_ledger(&p.payment_mint);
             }
         }

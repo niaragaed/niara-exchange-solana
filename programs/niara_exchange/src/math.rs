@@ -29,12 +29,7 @@ pub fn split_payment(
     cashback_eligible: bool,
 ) -> Result<PaymentSplit> {
     let denominator = u128::from(BPS_DENOMINATOR);
-    let fee = u128::from(payment_amount)
-        .checked_mul(u128::from(fee_bps))
-        .and_then(|n| n.checked_add(denominator - 1))
-        .ok_or(ExchangeError::MathOverflow)?
-        / denominator;
-    let fee = u64::try_from(fee).map_err(|_| error!(ExchangeError::MathOverflow))?;
+    let fee = bps_ceil(payment_amount, fee_bps)?;
 
     let cashback = if cashback_eligible {
         let c = u128::from(fee)
@@ -57,11 +52,46 @@ pub fn split_payment(
     })
 }
 
+/// `ceil(amount * bps / 10_000)`, checked, with a `u128` intermediate.
+fn bps_ceil(amount: u64, bps: u16) -> Result<u64> {
+    let denominator = u128::from(BPS_DENOMINATOR);
+    let value = u128::from(amount)
+        .checked_mul(u128::from(bps))
+        .and_then(|n| n.checked_add(denominator - 1))
+        .ok_or(ExchangeError::MathOverflow)?
+        / denominator;
+    u64::try_from(value).map_err(|_| error!(ExchangeError::MathOverflow))
+}
+
+/// Listing fee of a quote (spec §3.13):
+/// `ceil(valuation * listing_fee_bps / 10_000)`. Rounds up, like the trading
+/// fee, so a non-zero rate on a non-zero valuation is never free.
+pub fn listing_fee(valuation: u64, listing_fee_bps: u16) -> Result<u64> {
+    bps_ceil(valuation, listing_fee_bps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::MAX_FEE_BPS;
+    use crate::constants::{MAX_FEE_BPS, MAX_LISTING_FEE_BPS};
     use proptest::prelude::*;
+
+    #[test]
+    fn listing_fee_examples() {
+        // 1% of 1_000 USDT (6 decimals) = 10 USDT.
+        assert_eq!(listing_fee(1_000_000_000, 100).unwrap(), 10_000_000);
+        // 0.1% (the policy floor) of the same valuation.
+        assert_eq!(listing_fee(1_000_000_000, 10).unwrap(), 1_000_000);
+        // Rounds up: 1 bp of 1 unit is 0.0001 -> 1.
+        assert_eq!(listing_fee(1, 1).unwrap(), 1);
+        // 1% of 10_001 = 100.01 -> 101.
+        assert_eq!(listing_fee(10_001, 100).unwrap(), 101);
+        // The largest valuation at the cap does not overflow.
+        assert_eq!(
+            listing_fee(u64::MAX, MAX_LISTING_FEE_BPS).unwrap(),
+            u64::MAX / 100 + 1
+        );
+    }
 
     fn split(amount: u64, fee_bps: u16, cashback_bps: u16) -> PaymentSplit {
         split_payment(amount, fee_bps, cashback_bps, true).unwrap()
@@ -138,6 +168,21 @@ mod tests {
             if fee_bps > 0 && amount > 0 {
                 prop_assert!(s.fee > 0);
             }
+        }
+
+        #[test]
+        fn listing_fee_is_ceil_and_bounded(
+            valuation in 1..=u64::MAX,
+            bps in 1..=MAX_LISTING_FEE_BPS,
+        ) {
+            let fee = listing_fee(valuation, bps).unwrap();
+            let exact = u128::from(valuation) * u128::from(bps);
+            // ceil: the smallest value with fee * 10_000 >= valuation * bps.
+            prop_assert!(u128::from(fee) * 10_000 >= exact);
+            prop_assert!((u128::from(fee) - 1) * 10_000 < exact);
+            // Never free, never above 1% rounded up.
+            prop_assert!(fee >= 1);
+            prop_assert!(u128::from(fee) <= u128::from(valuation) / 100 + 1);
         }
     }
 }

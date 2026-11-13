@@ -120,8 +120,7 @@ fn settles_token_2022_metadata_mints() {
     let asset_mint = env.create_mint_2022(Some(issuer.pubkey()), &exts);
     env.submit_listing(&issuer, asset_mint, AssetClass::Equity, DOC_HASH)
         .unwrap();
-    let authority = env.listing_authority.insecure_clone();
-    env.approve(&authority, asset_mint).unwrap();
+    env.approve_paid(&issuer, asset_mint);
     let payment_mint = env.fee_currency(TOKEN_2022);
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
@@ -155,12 +154,13 @@ fn fee_rounds_up_and_cashback_rounds_down() {
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     // 30 bps of 10_001 = 30.003 -> fee 31; 20% of 31 = 6.2 -> cashback 6.
     env.settle(&m, match_id(1), 1, 10_001).unwrap();
-    assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 31);
+    // The vault also holds the listing's fee, paid when it was approved.
+    assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), LISTING_FEE + 31);
     assert_eq!(env.balance(&m.seller_payment), 9_970);
     assert_eq!(env.cashback(&m).accrued, 6);
     // 30 bps of 2 -> fee 1, seller gets 1.
     env.settle(&m, match_id(2), 1, 2).unwrap();
-    assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 32);
+    assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), LISTING_FEE + 32);
     assert_eq!(env.balance(&m.seller_payment), 9_971);
 }
 
@@ -207,7 +207,8 @@ fn zero_fee_after_timelocked_change() {
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     let meta = env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
     assert_eq!(env.balance(&m.seller_payment), PAYMENT);
-    assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 0);
+    // Only the listing fee: the trade added nothing.
+    assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), LISTING_FEE);
     let e = &events::<Settled>(&meta)[0];
     assert_eq!((e.fee, e.cashback), (0, 0));
 }
@@ -424,8 +425,7 @@ fn rejects_fixed_income_and_credit_assets() {
         let asset_mint = env.create_mint(SPL_TOKEN, Some(issuer.pubkey()));
         env.submit_listing(&issuer, asset_mint, class, DOC_HASH)
             .unwrap();
-        let authority = env.listing_authority.insecure_clone();
-        env.approve(&authority, asset_mint).unwrap();
+        env.approve_paid(&issuer, asset_mint);
         let payment_mint = env.fee_currency(SPL_TOKEN);
         let payer = env.admin.insecure_clone();
         env.init_cashback_ledger(&payer, asset_mint, payment_mint)
@@ -706,21 +706,27 @@ fn requires_an_initialized_cashback_ledger() {
 }
 
 /// The fee mint is listed but `init_fee_vault` has not run yet: there is no
-/// fee vault or ledger to collect into, so nothing settles.
+/// fee vault or ledger to collect into, so nothing settles. An issuer listing
+/// is approved by paying its fee into the vault, so this state only arises
+/// after a timelocked fee-mint switch.
 #[test]
 fn requires_the_fee_vault() {
     let mut env = Env::initialized();
-    let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN);
-    let usdt = env.fee_mint;
-    env.create_mint_at(usdt, SPL_TOKEN, Some(Pubkey::new_unique()));
+    let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN); // old USDT vault
+    let usdt = env.create_mint(SPL_TOKEN, Some(Pubkey::new_unique()));
+    let admin = env.admin.insecure_clone();
+    let change = ConfigChange::FeeMint(usdt);
+    env.propose(&admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    env.execute(&admin, &change).unwrap();
+    env.fee_mint = usdt;
     let authority = env.listing_authority.insecure_clone();
     env.list_currency(&authority, usdt).unwrap();
-    let payer = env.admin.insecure_clone();
-    env.init_cashback_ledger(&payer, asset_mint, usdt).unwrap();
+    env.init_cashback_ledger(&admin, asset_mint, usdt).unwrap();
     let m = env.trader_pair(asset_mint, usdt, issuer, 100, PAYMENT);
     let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::AccountNotInitialized);
 
-    env.init_fee_vault(&payer, usdt).unwrap();
+    env.init_fee_vault(&admin, usdt).unwrap();
     env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
 }

@@ -80,6 +80,7 @@ pub fn handle_init_fee_vault(ctx: Context<InitFeeVault>) -> Result<()> {
         cashback_withdrawn: 0,
         bump: ctx.bumps.fee_ledger,
         vault_bump: ctx.bumps.fee_vault,
+        listing_fees_collected: 0,
     });
     emit_cpi!(FeeVaultInitialized {
         fee_mint,

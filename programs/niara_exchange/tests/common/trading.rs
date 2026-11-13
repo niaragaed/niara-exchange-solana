@@ -223,15 +223,15 @@ impl Env {
         mint
     }
 
-    /// Submits and approves an `Equity` listing; returns (mint, issuer).
+    /// Submits an `Equity` listing and approves it by quote + payment of the
+    /// listing fee (`LISTING_FEE` into the fee vault); returns (mint, issuer).
     pub fn listed_equity(&mut self, token_program: Pubkey) -> (Pubkey, Keypair) {
         let issuer = self.funded_keypair();
         let mint = self.create_mint(token_program, Some(issuer.pubkey()));
         self.set_mint_decimals(&mint, ASSET_DECIMALS);
         self.submit_listing(&issuer, mint, AssetClass::Equity, DOC_HASH)
             .unwrap();
-        let authority = self.listing_authority.insecure_clone();
-        self.approve(&authority, mint).unwrap();
+        self.approve_paid(&issuer, mint);
         (mint, issuer)
     }
 
@@ -239,8 +239,9 @@ impl Env {
     /// ledger, funded accounts, and both delegations granted to the vault.
     /// Every market of one env shares the fee mint (and so its fee ledger).
     pub fn market(&mut self, asset_program: Pubkey, payment_program: Pubkey) -> Market {
-        let (asset_mint, issuer) = self.listed_equity(asset_program);
+        // The fee currency first: approving the listing pays a fee in it.
         let payment_mint = self.fee_currency(payment_program);
+        let (asset_mint, issuer) = self.listed_equity(asset_program);
         let payer = self.admin.insecure_clone();
         self.init_cashback_ledger(&payer, asset_mint, payment_mint)
             .unwrap();
@@ -386,12 +387,15 @@ impl Env {
         self.fetch(&fee_ledger_pda(payment_mint))
     }
 
-    /// Invariant 4 (no donations): fee vault balance == unwithdrawn fees.
+    /// Invariant 4 (no donations): fee vault balance == unwithdrawn trading
+    /// fees + listing fees + cashback.
     pub fn assert_vault_matches_ledger(&self, payment_mint: &Pubkey) {
         let ledger = self.fee_ledger(payment_mint);
         assert_eq!(
             self.balance(&fee_vault_pda(payment_mint)),
-            ledger.fees_collected - ledger.protocol_withdrawn - ledger.cashback_withdrawn,
+            ledger.fees_collected + ledger.listing_fees_collected
+                - ledger.protocol_withdrawn
+                - ledger.cashback_withdrawn,
             "fee vault balance != unwithdrawn fees: {ledger:?}"
         );
     }

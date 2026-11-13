@@ -67,3 +67,12 @@ pub const DEAL_VAULT_SEED: &[u8] = b"deal_vault";
 /// Longest a P2P deal may stay open: `expires_at <= now + 30 days`.
 #[constant]
 pub const MAX_DEAL_DURATION_SECS: i64 = 30 * 24 * 60 * 60;
+
+/// Hard cap on the listing fee: 1% of the issuer's valuation (spec §3.13).
+/// Business rule; the 0.1% floor is pricing policy and is not enforced.
+#[constant]
+pub const MAX_LISTING_FEE_BPS: u16 = 100;
+
+/// Longest a listing-fee quote stays payable: `expires_at <= now + 30 days`.
+#[constant]
+pub const MAX_QUOTE_DURATION_SECS: i64 = 30 * 24 * 60 * 60;

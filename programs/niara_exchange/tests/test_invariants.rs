@@ -415,9 +415,10 @@ impl World {
     /// `fee_program`: token program of the fee mint (USD).
     fn new(fee_program: Pubkey) -> Self {
         let mut env = Env::initialized();
-        let authority = env.listing_authority.insecure_clone();
         let mut mints = Vec::new();
         let mut issuers = Vec::new();
+        // USD first: approving an issuer listing pays its listing fee in it.
+        let usd = env.fee_currency(fee_program);
 
         for program in [SPL_TOKEN, TOKEN_2022] {
             let (mint, issuer) = env.listed_equity(program);
@@ -429,14 +430,14 @@ impl World {
             let mint = env.create_mint(SPL_TOKEN, Some(issuer.pubkey()));
             env.set_mint_decimals(&mint, ASSET_DECIMALS);
             env.submit_listing(&issuer, mint, class, DOC_HASH).unwrap();
-            env.approve(&authority, mint).unwrap();
+            env.approve_paid(&issuer, mint);
             mints.push(mint);
             issuers.push(issuer);
         }
         // USD is the fee mint (listed, with its fee vault); BRL and EUR are
         // plain currencies. Currency listings have no issuer; a stranger
         // stands in.
-        mints.push(env.fee_currency(fee_program));
+        mints.push(usd);
         issuers.push(env.funded_keypair());
         for program in [TOKEN_2022, SPL_TOKEN] {
             mints.push(env.listed_currency(program));
@@ -1517,8 +1518,11 @@ impl World {
             }
             prop_assert_eq!(accrued, ledger.cashback_accrued);
             prop_assert_eq!(withdrawn, ledger.cashback_withdrawn);
+            // The protocol's share: trading fees minus cashback, plus every
+            // listing fee (no cashback share).
             prop_assert!(
-                ledger.protocol_withdrawn <= ledger.fees_collected - ledger.cashback_accrued
+                ledger.protocol_withdrawn
+                    <= ledger.fees_collected - ledger.cashback_accrued + ledger.listing_fees_collected
             );
 
             // Invariant 4: the vault holds what is owed plus the donations

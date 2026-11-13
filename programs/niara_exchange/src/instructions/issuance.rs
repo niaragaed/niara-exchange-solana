@@ -51,8 +51,13 @@ pub fn handle_request_issuance(
     doc_hash: [u8; 32],
 ) -> Result<()> {
     let listing = &mut ctx.accounts.listing;
+    // Before approval too (`Pending`, `Quoted`): the initial offering can be
+    // prepared while the listing fee is pending. Execution waits for `Approved`.
     require!(
-        matches!(listing.status, ListingStatus::Pending | ListingStatus::Approved),
+        matches!(
+            listing.status,
+            ListingStatus::Pending | ListingStatus::Quoted | ListingStatus::Approved
+        ),
         ExchangeError::ListingNotIssuable
     );
     require!(amount > 0, ExchangeError::ZeroAmount);

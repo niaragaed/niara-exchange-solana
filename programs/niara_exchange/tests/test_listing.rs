@@ -181,12 +181,16 @@ fn list_currency_cannot_overwrite_existing_listing() {
 
 // ---- approve / suspend / delist ------------------------------------------------
 
+/// `approve_listing` reinstates a suspended listing (the first approval is
+/// `pay_listing_fee`, tested in test_listing_fee.rs).
 #[test]
-fn approve_listing_by_listing_authority() {
+fn approve_listing_reinstates_a_suspended_listing() {
     let (mut env, issuer, mint) = with_issuer();
     let authority = env.listing_authority.insecure_clone();
     env.submit_listing(&issuer, mint, AssetClass::FixedIncome, DOC_HASH)
         .unwrap();
+    env.approve_paid(&issuer, mint);
+    env.suspend(&authority, mint).unwrap();
 
     env.warp_secs(100);
     let now = env.now();
@@ -226,10 +230,16 @@ fn status_lifecycle() {
         .unwrap();
     let status = |env: &Env| env.fetch::<Listing>(&listing_pda(&mint)).status;
 
-    // Pending cannot be suspended.
+    // Pending cannot be suspended, nor approved without the listing fee.
+    assert_custom_err(env.suspend(&a, mint), ExchangeError::InvalidStatusTransition);
+    assert_custom_err(env.approve(&a, mint), ExchangeError::ListingFeeNotPaid);
+    env.ensure_fee_currency();
+    env.quote_default(mint).unwrap();
+    assert_eq!(status(&env), ListingStatus::Quoted);
+    // Quoted cannot be suspended either.
     assert_custom_err(env.suspend(&a, mint), ExchangeError::InvalidStatusTransition);
 
-    env.approve(&a, mint).unwrap();
+    env.pay_listing_fee(&issuer, mint).unwrap();
     assert_eq!(status(&env), ListingStatus::Approved);
     assert_custom_err(env.approve(&a, mint), ExchangeError::InvalidStatusTransition);
 
@@ -282,6 +292,8 @@ fn rotated_listing_authority_takes_over() {
     let new = env.funded_keypair();
     env.submit_listing(&issuer, mint, AssetClass::Equity, DOC_HASH)
         .unwrap();
+    env.approve_paid(&issuer, mint);
+    env.suspend(&old, mint).unwrap();
 
     let change = ConfigChange::ListingAuthority(new.pubkey());
     env.propose(&admin, change).unwrap();

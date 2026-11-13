@@ -186,9 +186,10 @@ pub fn handle_withdraw_protocol_fees(
 }
 
 /// Treasury pulls the fee vault's unaccounted excess: tokens that reached the
-/// vault outside `settle` (anyone can transfer into it). Owed funds
-/// (unwithdrawn protocol fees + unwithdrawn cashback) never move here, so after
-/// a sweep the vault holds exactly what the `FeeLedger` says (invariant 4).
+/// vault outside `settle`, `accept_deal` and `pay_listing_fee` (anyone can
+/// transfer into it). Owed funds (unwithdrawn trading fees, listing fees and
+/// cashback) never move here, so after a sweep the vault holds exactly what
+/// the `FeeLedger` says (invariant 4).
 #[event_cpi]
 #[derive(Accounts)]
 pub struct SweepExcess<'info> {

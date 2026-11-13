@@ -18,7 +18,14 @@ use solana_signer::Signer;
 const PAYMENT: u64 = 1_000_000_000;
 const FEE: u64 = 3_000_000;
 const CASHBACK: u64 = 600_000;
+/// Protocol share of one settlement's trading fee.
 const PROTOCOL: u64 = FEE - CASHBACK;
+/// The fee vault after `settled`: the market's listing fee (spec §3.13) plus
+/// the settlement's fee.
+const VAULT: u64 = LISTING_FEE + FEE;
+/// What the treasury may withdraw after `settled`: the trading share plus the
+/// listing fee, which is all protocol revenue.
+const TREASURY: u64 = PROTOCOL + LISTING_FEE;
 
 struct Setup {
     env: Env,
@@ -86,7 +93,7 @@ fn issuer_withdraws_cashback_in_parts() {
 
         s.withdraw_cashback(CASHBACK - 200_000).unwrap();
         assert_eq!(s.env.balance(&s.issuer_dest), CASHBACK);
-        assert_eq!(s.vault(), FEE - CASHBACK);
+        assert_eq!(s.vault(), VAULT - CASHBACK);
         let ledger = s.env.cashback(&s.m);
         assert_eq!((ledger.accrued, ledger.withdrawn), (CASHBACK, CASHBACK));
         assert_eq!(s.env.fee_ledger(&s.m.payment_mint).cashback_withdrawn, CASHBACK);
@@ -159,21 +166,24 @@ fn issuer_chooses_the_destination() {
 
 // ---- withdraw_protocol_fees -------------------------------------------------
 
+/// The protocol share is the trading fee minus cashback, plus every listing
+/// fee (no cashback share).
 #[test]
 fn treasury_withdraws_only_the_protocol_share() {
     for payment_program in [SPL_TOKEN, TOKEN_2022] {
         let mut s = settled(payment_program);
-        let res = s.withdraw_fees(PROTOCOL + 1);
+        assert_eq!(s.env.fee_ledger(&s.m.payment_mint).listing_fees_collected, LISTING_FEE);
+        let res = s.withdraw_fees(TREASURY + 1);
         assert_custom_err(res, ExchangeError::InsufficientProtocolFees);
 
-        let meta = s.withdraw_fees(PROTOCOL).unwrap();
+        let meta = s.withdraw_fees(TREASURY).unwrap();
         let e = &events::<ProtocolFeesWithdrawn>(&meta)[0];
         assert_eq!(e.treasury, s.env.treasury.pubkey());
         assert_eq!(e.payment_mint, s.m.payment_mint);
         assert_eq!(e.destination, s.treasury_dest);
-        assert_eq!(e.amount, PROTOCOL);
-        assert_eq!(s.env.balance(&s.treasury_dest), PROTOCOL);
-        assert_eq!(s.env.fee_ledger(&s.m.payment_mint).protocol_withdrawn, PROTOCOL);
+        assert_eq!(e.amount, TREASURY);
+        assert_eq!(s.env.balance(&s.treasury_dest), TREASURY);
+        assert_eq!(s.env.fee_ledger(&s.m.payment_mint).protocol_withdrawn, TREASURY);
         s.env.assert_vault_matches_ledger(&s.m.payment_mint);
 
         // The cashback share stays for the issuer.
@@ -201,7 +211,7 @@ fn withdrawals_interleave_with_settlements() {
     );
     s.env.settle(&m, match_id(2), 1, PAYMENT).unwrap();
     s.env.assert_vault_matches_ledger(&s.m.payment_mint);
-    s.withdraw_fees(2 * PROTOCOL - 1_000_000).unwrap();
+    s.withdraw_fees(TREASURY + PROTOCOL - 1_000_000).unwrap();
     s.withdraw_cashback(2 * CASHBACK - 100_000).unwrap();
     assert_eq!(s.vault(), 0);
     s.env.assert_vault_matches_ledger(&s.m.payment_mint);
@@ -258,7 +268,7 @@ fn treasury_sweeps_only_the_excess() {
     for payment_program in [SPL_TOKEN, TOKEN_2022] {
         let mut s = settled(payment_program);
         s.env.donate_to_fee_vault(s.m.payment_mint, 777);
-        assert_eq!(s.vault(), FEE + 777);
+        assert_eq!(s.vault(), VAULT + 777);
         let ledger_before = s.env.fee_ledger(&s.m.payment_mint);
 
         let meta = s.sweep().unwrap();
@@ -267,11 +277,11 @@ fn treasury_sweeps_only_the_excess() {
         assert_eq!(e.payment_mint, s.m.payment_mint);
         assert_eq!(e.destination, s.treasury_dest);
         assert_eq!(e.amount, 777);
-        assert_eq!(e.vault_balance_after, FEE);
+        assert_eq!(e.vault_balance_after, VAULT);
         assert_eq!(s.env.balance(&s.treasury_dest), 777);
 
         // Invariant 4 is strict again; the ledger is untouched.
-        assert_eq!(s.vault(), FEE);
+        assert_eq!(s.vault(), VAULT);
         s.env.assert_vault_matches_ledger(&s.m.payment_mint);
         let ledger = s.env.fee_ledger(&s.m.payment_mint);
         assert_eq!(
@@ -286,7 +296,7 @@ fn treasury_sweeps_only_the_excess() {
 
         // Everything owed is still there for its owners.
         s.withdraw_cashback(CASHBACK).unwrap();
-        s.withdraw_fees(PROTOCOL).unwrap();
+        s.withdraw_fees(TREASURY).unwrap();
         assert_eq!(s.vault(), 0);
     }
 }
@@ -324,10 +334,10 @@ fn sweep_interleaves_with_settlements_and_withdrawals() {
     let meta = s.sweep().unwrap();
     assert_eq!(events::<ExcessSwept>(&meta)[0].amount, 42);
     s.env.assert_vault_matches_ledger(&s.m.payment_mint);
-    s.withdraw_fees(2 * PROTOCOL - 1_000_000).unwrap();
+    s.withdraw_fees(TREASURY + PROTOCOL - 1_000_000).unwrap();
     s.withdraw_cashback(2 * CASHBACK - 100_000).unwrap();
     assert_eq!(s.vault(), 0);
-    assert_eq!(s.env.balance(&s.treasury_dest), 2 * PROTOCOL + 42);
+    assert_eq!(s.env.balance(&s.treasury_dest), TREASURY + PROTOCOL + 42);
 }
 
 #[test]
@@ -346,7 +356,7 @@ fn only_the_treasury_sweeps() {
         let res = s.env.sweep_excess(&intruder, s.m.payment_mint, dest);
         assert_custom_err(res, ExchangeError::Unauthorized);
     }
-    assert_eq!(s.vault(), FEE + 500);
+    assert_eq!(s.vault(), VAULT + 500);
 }
 
 #[test]
@@ -356,10 +366,10 @@ fn sweep_is_blocked_while_paused() {
     let admin = s.env.admin.insecure_clone();
     s.env.pause(&admin).unwrap();
     assert_custom_err(s.sweep(), ExchangeError::Paused);
-    assert_eq!(s.vault(), FEE + 500);
+    assert_eq!(s.vault(), VAULT + 500);
     s.env.unpause(&admin).unwrap();
     s.sweep().unwrap();
-    assert_eq!(s.vault(), FEE);
+    assert_eq!(s.vault(), VAULT);
 }
 
 #[test]
@@ -370,7 +380,7 @@ fn sweep_destination_must_hold_the_payment_mint() {
     let wrong = s.env.create_token_account(SPL_TOKEN, s.m.asset_mint, treasury.pubkey(), 0);
     let res = s.env.sweep_excess(&treasury, s.m.payment_mint, wrong);
     assert_custom_err(res, AnchorError::ConstraintTokenMint);
-    assert_eq!(s.vault(), FEE + 500);
+    assert_eq!(s.vault(), VAULT + 500);
 }
 
 // ---- shared failure paths -----------------------------------------------------
@@ -384,7 +394,7 @@ fn both_withdrawals_are_blocked_while_paused() {
     s.env.pause(&admin).unwrap();
     assert_custom_err(s.withdraw_cashback(1), ExchangeError::Paused);
     assert_custom_err(s.withdraw_fees(1), ExchangeError::Paused);
-    assert_eq!(s.vault(), FEE);
+    assert_eq!(s.vault(), VAULT);
     s.env.unpause(&admin).unwrap();
     s.withdraw_cashback(1).unwrap();
     s.withdraw_fees(1).unwrap();
@@ -452,7 +462,7 @@ fn withdrawals_survive_listing_status_changes() {
     s.env.delist(&authority, s.m.asset_mint).unwrap();
     s.env.suspend(&authority, s.m.payment_mint).unwrap();
     s.withdraw_cashback(CASHBACK).unwrap();
-    s.withdraw_fees(PROTOCOL).unwrap();
+    s.withdraw_fees(TREASURY).unwrap();
     assert_eq!(s.vault(), 0);
 }
 

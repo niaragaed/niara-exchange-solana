@@ -209,8 +209,10 @@ fn donations_to_the_vault_are_not_accounted() {
 
     let ledger = env.fee_ledger(&m.payment_mint);
     assert_eq!(ledger.fees_collected, ledger_before.fees_collected);
-    let unwithdrawn =
-        ledger.fees_collected - ledger.protocol_withdrawn - ledger.cashback_withdrawn;
+    assert_eq!(ledger.listing_fees_collected, LISTING_FEE);
+    let unwithdrawn = ledger.fees_collected + ledger.listing_fees_collected
+        - ledger.protocol_withdrawn
+        - ledger.cashback_withdrawn;
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), unwithdrawn + 500);
 }
 
@@ -285,7 +287,11 @@ fn fee_mint_switch_keeps_old_balances_withdrawable() {
     assert!(cashback > 0);
     let to = env.create_token_account(SPL_TOKEN, old_usdt, issuer.pubkey(), 0);
     env.withdraw_cashback(&issuer, old.asset_mint, old_usdt, to, cashback).unwrap();
-    let protocol = old_ledger.fees_collected - old_ledger.cashback_accrued;
+    // Protocol share of the trading fees, plus the two listing fees (equity
+    // and bond) paid in the old mint.
+    assert_eq!(old_ledger.listing_fees_collected, 2 * LISTING_FEE);
+    let protocol = old_ledger.fees_collected - old_ledger.cashback_accrued
+        + old_ledger.listing_fees_collected;
     let treasury = env.treasury.insecure_clone();
     let to = env.create_token_account(SPL_TOKEN, old_usdt, treasury.pubkey(), 0);
     env.withdraw_protocol_fees(&treasury, old_usdt, to, protocol).unwrap();

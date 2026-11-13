@@ -50,8 +50,8 @@ fn submitted(token_program: Pubkey, class: AssetClass) -> Issuer {
 
 fn approved(token_program: Pubkey) -> Issuer {
     let mut s = submitted(token_program, AssetClass::Equity);
-    let authority = s.authority.insecure_clone();
-    s.env.approve(&authority, s.mint).unwrap();
+    let issuer = s.issuer.insecure_clone();
+    s.env.approve_paid(&issuer, s.mint);
     s
 }
 
@@ -256,17 +256,22 @@ fn only_the_listing_issuer_requests_issuance() {
 }
 
 #[test]
-fn request_issuance_only_while_pending_or_approved() {
+fn request_issuance_only_while_pending_quoted_or_approved() {
     let mut s = submitted(SPL_TOKEN, AssetClass::Equity);
     let authority = s.authority.insecure_clone();
+    let issuer = s.issuer.insecure_clone();
     s.request(1).unwrap(); // Pending
-    s.env.approve(&authority, s.mint).unwrap();
+    s.env.ensure_fee_currency();
+    s.env.quote_default(s.mint).unwrap();
+    s.request(1).unwrap(); // Quoted
+    s.env.pay_listing_fee(&issuer, s.mint).unwrap();
     s.request(1).unwrap(); // Approved
     s.env.suspend(&authority, s.mint).unwrap();
     assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable);
     s.env.delist(&authority, s.mint).unwrap();
     assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable);
-    assert_eq!(s.env.listing(&s.mint).next_batch_no, 3);
+    // Batches 1 to 3 (Pending, Quoted, Approved).
+    assert_eq!(s.env.listing(&s.mint).next_batch_no, 4);
 }
 
 #[test]
@@ -334,18 +339,24 @@ fn a_batch_executes_at_most_once() {
     assert_eq!(s.supply(), 100);
 }
 
-/// Batches may be requested while the listing is `Pending`, but execute only
-/// once it is `Approved`.
+/// Batches may be requested while the listing is `Pending` or `Quoted`, but
+/// execute only once it is `Approved`, i.e. once the listing fee is paid.
 #[test]
 fn batch_on_a_pending_listing_waits_for_approval() {
     let mut s = submitted(SPL_TOKEN, AssetClass::Equity);
     s.request(100).unwrap();
     assert_custom_err(s.approve_batch(1), ExchangeError::ListingNotApproved);
+    s.env.ensure_fee_currency();
+    s.env.quote_default(s.mint).unwrap();
+    assert_custom_err(s.approve_batch(1), ExchangeError::ListingNotApproved);
     assert_eq!(s.supply(), 0);
-    let authority = s.authority.insecure_clone();
-    s.env.approve(&authority, s.mint).unwrap();
+    let issuer = s.issuer.insecure_clone();
+    s.env.pay_listing_fee(&issuer, s.mint).unwrap();
     s.approve_batch(1).unwrap();
     assert_eq!(s.supply(), 100);
+    // The batch charged no second listing fee.
+    let ledger = s.env.fee_ledger(&s.env.fee_mint);
+    assert_eq!(ledger.listing_fees_collected, LISTING_FEE);
 }
 
 #[test]
@@ -445,8 +456,8 @@ fn batch_is_bound_to_its_listing() {
     s.env
         .submit_listing(&other_issuer, other, AssetClass::Equity, DOC_HASH)
         .unwrap();
+    s.env.approve_paid(&other_issuer, other);
     let authority = s.authority.insecure_clone();
-    s.env.approve(&authority, other).unwrap();
     let dest = s.env.create_token_account(SPL_TOKEN, other, s.holder.pubkey(), 0);
     // Batch 1 of the first listing, presented with the second mint.
     let ix = anchor_lang::solana_program::instruction::Instruction::new_with_bytes(

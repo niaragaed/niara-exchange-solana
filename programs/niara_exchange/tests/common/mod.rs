@@ -3,10 +3,13 @@
 
 mod deal;
 mod issuance;
+mod listing_fee;
 mod trading;
 #[allow(unused_imports)] // only the escrow suites use the deal fixtures
 pub use deal::*;
 pub use issuance::*;
+#[allow(unused_imports)] // the constants are used by some suites only
+pub use listing_fee::*;
 pub use trading::*;
 
 use std::str::FromStr;
@@ -522,6 +525,8 @@ impl Env {
         }
     }
 
+    /// `approve_listing`: reinstates a `Suspended` listing. A `Pending` issuer
+    /// listing is approved with `approve_paid` (quote + pay) instead.
     pub fn approve(&mut self, authority: &Keypair, mint: Pubkey) -> TransactionResult {
         let ix = ix(self.status_accounts(authority, &mint), instruction::ApproveListing {});
         self.send(&[ix], &[authority])

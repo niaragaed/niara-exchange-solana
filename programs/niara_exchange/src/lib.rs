@@ -75,6 +75,23 @@ pub mod niara_exchange {
         instructions::listing::handle_list_currency(ctx)
     }
 
+    /// Listing authority quotes the listing fee of a `Pending` or `Quoted`
+    /// issuer listing (spec §3.13). `valuation` is in fee-mint base units.
+    pub fn quote_listing(
+        ctx: Context<UpdateListingStatus>,
+        valuation: u64,
+        listing_fee_bps: u16,
+        expires_at: i64,
+    ) -> Result<()> {
+        instructions::listing_fee::handle_quote_listing(ctx, valuation, listing_fee_bps, expires_at)
+    }
+
+    /// Issuer pays the quoted listing fee; the listing becomes `Approved`.
+    pub fn pay_listing_fee(ctx: Context<PayListingFee>) -> Result<()> {
+        instructions::listing_fee::handle_pay_listing_fee(ctx)
+    }
+
+    /// Reinstates a `Suspended` listing; refuses `Pending` and `Quoted`.
     pub fn approve_listing(ctx: Context<UpdateListingStatus>) -> Result<()> {
         instructions::listing::handle_approve_listing(ctx)
     }

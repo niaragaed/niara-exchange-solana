@@ -70,7 +70,7 @@ pub enum ExchangeError {
     NothingToSweep,
     #[msg("Asset mint must have zero supply when the listing is submitted")]
     NonZeroSupply,
-    #[msg("Issuance can only be requested while the listing is Pending or Approved")]
+    #[msg("Issuance can only be requested while the listing is Pending, Quoted or Approved")]
     ListingNotIssuable,
     #[msg("Issuance batch was already executed or rejected")]
     BatchNotRequested,
@@ -112,4 +112,16 @@ pub enum ExchangeError {
     AdminChangeNeedsAcceptance,
     #[msg("Signer is not the admin proposed in the pending admin change")]
     NotPendingAdmin,
+    #[msg("valuation must be greater than zero")]
+    ZeroValuation,
+    #[msg("listing_fee_bps must be between 1 and MAX_LISTING_FEE_BPS")]
+    InvalidListingFeeBps,
+    #[msg("Listing has no listing-fee quote to pay")]
+    ListingNotQuoted,
+    #[msg("Listing-fee quote has expired")]
+    QuoteExpired,
+    #[msg("An issuer listing is approved only by paying its listing fee")]
+    ListingFeeNotPaid,
+    #[msg("Currency listings pay no listing fee")]
+    CurrencyHasNoListingFee,
 }

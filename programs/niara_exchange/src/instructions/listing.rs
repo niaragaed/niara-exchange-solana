@@ -91,6 +91,13 @@ pub fn handle_submit_listing(
         issued: 0,
         burned: 0,
         cashback_frozen: false,
+        // Set by quote_listing / pay_listing_fee (spec §3.13).
+        valuation: 0,
+        listing_fee_bps: 0,
+        listing_fee: 0,
+        listing_fee_mint: Pubkey::default(),
+        quote_expires_at: 0,
+        listing_fee_paid: 0,
         bump: ctx.bumps.listing,
     });
     emit_cpi!(ListingSubmitted {
@@ -152,6 +159,13 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
         issued: 0,
         burned: 0,
         cashback_frozen: false,
+        // Currencies pay no listing fee.
+        valuation: 0,
+        listing_fee_bps: 0,
+        listing_fee: 0,
+        listing_fee_mint: Pubkey::default(),
+        quote_expires_at: 0,
+        listing_fee_paid: 0,
         bump: ctx.bumps.listing,
     };
     ctx.accounts.listing.set_inner(listing.clone());
@@ -167,7 +181,8 @@ pub fn handle_list_currency(ctx: Context<ListCurrency>) -> Result<()> {
     Ok(())
 }
 
-/// Shared by `approve_listing`, `suspend_listing` and `delist`.
+/// Shared by `approve_listing`, `suspend_listing`, `delist`, the cashback
+/// freeze and `quote_listing`.
 #[event_cpi]
 #[derive(Accounts)]
 pub struct UpdateListingStatus<'info> {
@@ -186,7 +201,7 @@ pub struct UpdateListingStatus<'info> {
     pub listing: Account<'info, Listing>,
 }
 
-fn transition(listing: &mut Listing, next: ListingStatus) -> Result<()> {
+pub(crate) fn transition(listing: &mut Listing, next: ListingStatus) -> Result<()> {
     require!(
         listing.status.can_transition_to(next),
         ExchangeError::InvalidStatusTransition
@@ -195,9 +210,16 @@ fn transition(listing: &mut Listing, next: ListingStatus) -> Result<()> {
     Ok(())
 }
 
+/// Reinstates a `Suspended` listing (any class, no charge). An issuer listing
+/// is first approved only by `pay_listing_fee` (spec §3.13), so a `Pending`
+/// or `Quoted` one is refused here.
 pub fn handle_approve_listing(ctx: Context<UpdateListingStatus>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let listing = &mut ctx.accounts.listing;
+    require!(
+        !matches!(listing.status, ListingStatus::Pending | ListingStatus::Quoted),
+        ExchangeError::ListingFeeNotPaid
+    );
     transition(listing, ListingStatus::Approved)?;
     listing.approved_at = now;
     let event = ListingApproved {

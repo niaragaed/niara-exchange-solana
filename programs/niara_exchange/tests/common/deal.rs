@@ -117,7 +117,8 @@ pub struct RefundAccounts {
 }
 
 impl Env {
-    /// Submits and approves an issuer listing of `class`; returns (mint, issuer).
+    /// Submits an issuer listing of `class` and approves it by quote +
+    /// payment of the listing fee; returns (mint, issuer).
     pub fn listed_issuer_asset(
         &mut self,
         token_program: Pubkey,
@@ -127,8 +128,7 @@ impl Env {
         let mint = self.create_mint(token_program, Some(issuer.pubkey()));
         self.set_mint_decimals(&mint, ASSET_DECIMALS);
         self.submit_listing(&issuer, mint, class, DOC_HASH).unwrap();
-        let authority = self.listing_authority.insecure_clone();
-        self.approve(&authority, mint).unwrap();
+        self.approve_paid(&issuer, mint);
         (mint, issuer)
     }
 
@@ -136,12 +136,13 @@ impl Env {
     /// cashback ledger when the class is eligible, and two funded parties.
     /// A `Currency` asset is a fresh non-fee currency (BRL -> USDT).
     pub fn p2p(&mut self, class: AssetClass, asset_program: Pubkey, payment_program: Pubkey) -> P2p {
+        // The fee currency first: approving an issuer listing pays a fee in it.
+        let payment_mint = self.fee_currency(payment_program);
         let (asset_mint, issuer) = if class == AssetClass::Currency {
             (self.listed_currency(asset_program), self.funded_keypair())
         } else {
             self.listed_issuer_asset(asset_program, class)
         };
-        let payment_mint = self.fee_currency(payment_program);
         if class.cashback_eligible() {
             let payer = self.admin.insecure_clone();
             self.init_cashback_ledger(&payer, asset_mint, payment_mint)

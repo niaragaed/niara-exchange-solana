@@ -10,8 +10,8 @@ use solana_signer::Signer;
 #[test]
 fn anyone_can_create_a_ledger_for_an_eligible_listing() {
     let mut env = Env::initialized();
-    let (asset, _) = env.listed_equity(SPL_TOKEN);
     let usdt = env.fee_currency(TOKEN_2022);
+    let (asset, _) = env.listed_equity(SPL_TOKEN);
     let stranger = env.funded_keypair();
     env.init_cashback_ledger(&stranger, asset, usdt).unwrap();
     let ledger: CashbackLedger = env.fetch(&cashback_pda(&asset, &usdt));
@@ -94,19 +94,32 @@ fn rejects_unlisted_mints() {
 }
 
 /// Pause principle (spec §3.3): listing actions and ledger setup stay
-/// available while paused; only payouts and trading stop.
+/// available while paused; only payouts, trading and `pay_listing_fee` stop.
 #[test]
 fn listing_actions_and_ledger_setup_work_while_paused() {
     let mut env = Env::initialized();
     let admin = env.admin.insecure_clone();
+    // Paying the listing fee is blocked while paused, so this listing is
+    // approved first.
+    let (asset, _) = env.listed_equity(SPL_TOKEN); // submit + quote + pay
     env.pause(&admin).unwrap();
 
-    let (asset, _) = env.listed_equity(SPL_TOKEN); // submit + approve
-    let usdt = env.fee_currency(SPL_TOKEN); // list_currency + init_fee_vault
+    let usdt = env.fee_currency(SPL_TOKEN); // already there: no-op
     env.listed_currency(SPL_TOKEN); // list_currency
     env.init_cashback_ledger(&admin, asset, usdt).unwrap();
     let authority = env.listing_authority.insecure_clone();
     env.suspend(&authority, asset).unwrap();
-    env.approve(&authority, asset).unwrap();
+    env.approve(&authority, asset).unwrap(); // reinstatement
     env.delist(&authority, asset).unwrap();
+
+    // A new issuer listing can be submitted, quoted and re-quoted.
+    let issuer = env.funded_keypair();
+    let mint = env.create_mint(SPL_TOKEN, Some(issuer.pubkey()));
+    env.submit_listing(&issuer, mint, AssetClass::Equity, DOC_HASH)
+        .unwrap();
+    env.quote_default(mint).unwrap();
+    env.quote_default(mint).unwrap();
+    // A fee vault for a new fee mint can be created too (covered in
+    // test_fee_ledger); paying waits for unpause.
+    assert_custom_err(env.pay_listing_fee(&issuer, mint), ExchangeError::Paused);
 }

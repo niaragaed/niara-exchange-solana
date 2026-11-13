@@ -47,6 +47,33 @@ pub struct ListingApproved {
     pub approved_at: i64,
 }
 
+/// The listing authority quoted the listing fee (spec §3.13). `valuation` and
+/// `listing_fee` are in base units of `fee_mint`; the quote can be paid while
+/// `now < expires_at`. A re-quote emits a new event that replaces this one.
+#[event]
+pub struct ListingQuoted {
+    pub listing: Pubkey,
+    pub asset_mint: Pubkey,
+    pub fee_mint: Pubkey,
+    pub valuation: u64,
+    pub listing_fee_bps: u16,
+    pub listing_fee: u64,
+    pub expires_at: i64,
+}
+
+/// The issuer paid the listing fee into the fee vault (protocol revenue, no
+/// cashback). Followed by `ListingApproved` in the same instruction.
+#[event]
+pub struct ListingFeePaid {
+    pub listing: Pubkey,
+    pub asset_mint: Pubkey,
+    pub issuer: Pubkey,
+    pub fee_mint: Pubkey,
+    pub valuation: u64,
+    pub listing_fee_bps: u16,
+    pub amount: u64,
+}
+
 #[event]
 pub struct ListingSuspended {
     pub listing: Pubkey,

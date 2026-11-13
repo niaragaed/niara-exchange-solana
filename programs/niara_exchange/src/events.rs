@@ -59,12 +59,12 @@ pub struct ListingDelisted {
     pub asset_mint: Pubkey,
 }
 
-/// One order-book settlement. `order_id` is the off-chain match (fill) id.
+/// One order-book settlement. `match_id` is the off-chain match (fill) id.
 /// `payment_amount == seller_receives + fee`; `cashback` is the part of `fee`
 /// credited to the asset issuer.
 #[event]
 pub struct Settled {
-    pub order_id: [u8; 16],
+    pub match_id: [u8; 16],
     pub asset_mint: Pubkey,
     pub payment_mint: Pubkey,
     pub buyer: Pubkey,

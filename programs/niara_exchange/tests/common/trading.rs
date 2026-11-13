@@ -33,12 +33,12 @@ pub fn cashback_pda(asset_mint: &Pubkey, payment_mint: &Pubkey) -> Pubkey {
     .0
 }
 
-pub fn settled_pda(order_id: &[u8; 16]) -> Pubkey {
-    Pubkey::find_program_address(&[SETTLED_SEED, order_id.as_ref()], &program_id()).0
+pub fn settled_pda(match_id: &[u8; 16]) -> Pubkey {
+    Pubkey::find_program_address(&[SETTLED_SEED, match_id.as_ref()], &program_id()).0
 }
 
 /// Deterministic 16-byte match id for tests.
-pub fn order_id(n: u128) -> [u8; 16] {
+pub fn match_id(n: u128) -> [u8; 16] {
     n.to_le_bytes()
 }
 
@@ -353,7 +353,7 @@ impl Env {
                 program: program_id(),
             },
             instruction::Settle {
-                order_id: id,
+                match_id: id,
                 asset_amount,
                 payment_amount,
             },

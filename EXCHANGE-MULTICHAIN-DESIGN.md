@@ -128,7 +128,7 @@ interface SettlementAdapter {
 | Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
 | `CashbackLedger` | `["cashback", listing, fee_mint]` | `listing`, `payment_mint` (= the fee mint it was created for), `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` for a cashback-eligible listing and the current `Config.fee_mint`, never lazily inside `settle` |
 | `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
-| `SettlementRecord` | `["settled", order_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
+| `SettlementRecord` | `["settled", match_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
 | `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `fee_bps`, `cashback_bps` (the config's rates at `open_deal`, charged at `accept_deal`: the fee is part of the agreed terms, §3.5), `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
 | Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
@@ -148,7 +148,7 @@ interface SettlementAdapter {
 | `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
 | `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, `Config.fee_mint`) before the listing's first settlement or deal |
-| `settle(order_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint`; `order_id` (the match id) not all zeros (see 3.4) |
+| `settle(match_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint`; `match_id` not all zeros (see 3.4) |
 | `open_deal(deal_id, terms, expires_at)` | proposer | P2P mode: `FixedIncome`/`Credit`/`Currency` asset, `Approved` `Currency` payment, one leg in the fee mint (§3.4); `terms = { counterparty, proposer_side, asset_amount, payment_amount }`; `deal_id` not all zeros (`ZeroDealId`); `now < expires_at ≤ now + 30 days`; stores the current `fee_bps`/`cashback_bps` on the deal; proposer deposits its side into the deal vault (see 3.5). Emits `DealOpened` (with the stored rates) |
 | `accept_deal` | `deal.counterparty` | P2P mode: counterparty delivers its side; same instruction swaps both legs, charges the fee on the fee-mint leg at the rates stored on the deal (not the current ones), accrues cashback, closes vault; only while `now < expires_at` (see 3.5). Emits `DealExecuted` |
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
@@ -221,7 +221,7 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
 - Multi-currency payment with fee conversion (e.g. charging the fee of a
   BRL ↔ EUR deal in USDT) needs a price oracle and is out of v1 (§3.10).
 
-`order_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
+`match_id` is the off-chain **match (fill) id**, a 16-byte UUID (the
 `matches.id` primary key), not the maker's order id: one order can be filled by
 several matches, and each match settles at most once. An all-zero id is
 rejected (`ZeroMatchId`): it is what an unset field looks like, never a real
@@ -230,10 +230,10 @@ raw units of the payment mint; the program does no price conversion.
 
 Preconditions (all enforced on-chain):
 - `!config.paused`; signer is `config.settlement_operator`
-- `order_id != [0; 16]` (`ZeroMatchId`)
+- `match_id != [0; 16]` (`ZeroMatchId`)
 - `asset_amount > 0`, `payment_amount > 0`
 - `buyer != seller`; neither is the vault authority
-- `["settled", order_id]` does not exist yet (replay guard: the operator
+- `["settled", match_id]` does not exist yet (replay guard: the operator
   cannot settle the same match twice, even within the delegated amounts)
 - asset listing: `status == Approved`, `asset_class == Equity`,
   `listing.asset_mint == asset_mint`
@@ -265,7 +265,7 @@ Each `transfer_checked` uses its own mint's decimals; zero-amount legs (e.g.
 3. `transfer_checked` payment: buyer → fee vault, `fee`
 4. `FeeLedger.fees_collected += fee`, `FeeLedger.cashback_accrued += cashback`,
    `CashbackLedger.accrued += cashback`
-5. `emit_cpi!(Settled { order_id, asset_mint, payment_mint, buyer, seller, asset_amount, payment_amount, fee, cashback })`
+5. `emit_cpi!(Settled { match_id, asset_mint, payment_mint, buyer, seller, asset_amount, payment_amount, fee, cashback })`
 
 ### 3.5 Custody model — DECISION (2026-10-22): delegate for listing, escrow for P2P
 
@@ -772,7 +772,7 @@ Aligned on both chains:
 - **on-chain replay protection**: a match id settles at most once. EVM:
   `settle(bytes16 matchId, ...)` sets `settledMatches[matchId]` before any transfer and
   reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first,
-  like Solana's `order_id` (a storage slot instead of a `SettlementRecord` account, so
+  like Solana's `match_id` (a storage slot instead of a `SettlementRecord` account, so
   no rent).
 
 What still differs, on purpose:
@@ -811,7 +811,7 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
 - Operator keys **never** in the frontend, never in `NEXT_PUBLIC_*`, never in git.
 - Idempotent: a match is settled at most once (unique constraint on `match_id`
   off-chain; on Solana also on-chain, since `settle` takes the match UUID as
-  `order_id` and creates `["settled", order_id]`).
+  `match_id` and creates `["settled", match_id]`).
 
 ---
 

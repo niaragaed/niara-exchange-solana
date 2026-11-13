@@ -168,7 +168,7 @@ export function pdas(programId: PublicKey) {
     feeVault: (feeMint: PublicKey) => find("fee_vault", feeMint.toBuffer()),
     feeLedger: (feeMint: PublicKey) => find("fees", feeMint.toBuffer()),
     cashbackLedger: (listing: PublicKey, feeMint: PublicKey) => find("cashback", listing.toBuffer(), feeMint.toBuffer()),
-    settlementRecord: (orderId: Uint8Array) => find("settled", orderId),
+    settlementRecord: (matchId: Uint8Array) => find("settled", matchId),
     deal: (proposer: PublicKey, dealId: Uint8Array) => find("deal", proposer.toBuffer(), dealId),
     dealVault: (deal: PublicKey) => find("deal_vault", deal.toBuffer()),
   };

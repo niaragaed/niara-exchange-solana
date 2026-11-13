@@ -41,7 +41,7 @@ pub const FEE_LEDGER_SEED: &[u8] = b"fees";
 #[constant]
 pub const CASHBACK_SEED: &[u8] = b"cashback";
 
-/// Per settled match: `["settled", order_id]` replay guard.
+/// Per settled match: `["settled", match_id]` replay guard.
 #[constant]
 pub const SETTLED_SEED: &[u8] = b"settled";
 

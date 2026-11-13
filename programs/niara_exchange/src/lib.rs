@@ -133,14 +133,14 @@ pub mod niara_exchange {
         instructions::cashback::handle_init_cashback_ledger(ctx)
     }
 
-    /// `order_id` is the off-chain match (fill) id; each settles at most once.
+    /// `match_id` is the off-chain match (fill) id; each settles at most once.
     pub fn settle(
         ctx: Context<Settle>,
-        order_id: [u8; 16],
+        match_id: [u8; 16],
         asset_amount: u64,
         payment_amount: u64,
     ) -> Result<()> {
-        instructions::settle::handle_settle(ctx, order_id, asset_amount, payment_amount)
+        instructions::settle::handle_settle(ctx, match_id, asset_amount, payment_amount)
     }
 
     // ---- P2P escrow (spec §3.5) -------------------------------------------

@@ -359,8 +359,8 @@ pub enum BurnReason {
     Cancellation,
 }
 
-/// Replay guard for one settled match. PDA: `["settled", order_id]`.
-/// Never closed: closing it would allow the same `order_id` to settle again.
+/// Replay guard for one settled match. PDA: `["settled", match_id]`.
+/// Never closed: closing it would allow the same `match_id` to settle again.
 #[account]
 #[derive(InitSpace)]
 pub struct SettlementRecord {

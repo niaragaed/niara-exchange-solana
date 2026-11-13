@@ -32,7 +32,7 @@ struct Setup {
 fn settled(payment_program: Pubkey) -> Setup {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, payment_program);
-    env.settle(&m, order_id(1), 1, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), 1, PAYMENT).unwrap();
     let issuer_dest = env.create_token_account(payment_program, m.payment_mint, m.issuer.pubkey(), 0);
     let treasury = env.treasury.pubkey();
     let treasury_dest = env.create_token_account(payment_program, m.payment_mint, treasury, 0);
@@ -199,7 +199,7 @@ fn withdrawals_interleave_with_settlements() {
         10,
         PAYMENT,
     );
-    s.env.settle(&m, order_id(2), 1, PAYMENT).unwrap();
+    s.env.settle(&m, match_id(2), 1, PAYMENT).unwrap();
     s.env.assert_vault_matches_ledger(&s.m.payment_mint);
     s.withdraw_fees(2 * PROTOCOL - 1_000_000).unwrap();
     s.withdraw_cashback(2 * CASHBACK - 100_000).unwrap();
@@ -318,7 +318,7 @@ fn sweep_interleaves_with_settlements_and_withdrawals() {
     s.env.donate_to_fee_vault(s.m.payment_mint, 40);
     s.withdraw_cashback(100_000).unwrap();
     let m = s.env.trader_pair(s.m.asset_mint, s.m.payment_mint, s.issuer(), 10, PAYMENT);
-    s.env.settle(&m, order_id(2), 1, PAYMENT).unwrap();
+    s.env.settle(&m, match_id(2), 1, PAYMENT).unwrap();
     s.env.donate_to_fee_vault(s.m.payment_mint, 2);
 
     let meta = s.sweep().unwrap();

@@ -289,12 +289,12 @@ async function flowEquity(demo: Demo): Promise<void> {
 
   const config = await program.account.config.fetch(pda.config());
   const { fee, cashback } = feeSplit(payment, config.feeBps, config.cashbackBps, true);
-  const orderId = randomBytes(16);
+  const matchId = randomBytes(16);
   await step(
-    `settle (operator): match ${orderId.toString("hex")}, ${shares} tEQTY for ${usdt(payment)}`,
+    `settle (operator): match ${matchId.toString("hex")}, ${shares} tEQTY for ${usdt(payment)}`,
     [
       await program.methods
-        .settle(Array.from(orderId), bn(shares), bn(payment))
+        .settle(Array.from(matchId), bn(shares), bn(payment))
         .accountsPartial({
           settlementOperator: demo.operator.publicKey,
           config: pda.config(),
@@ -312,7 +312,7 @@ async function flowEquity(demo: Demo): Promise<void> {
           feeLedger: pda.feeLedger(demo.usdt),
           feeVault: pda.feeVault(demo.usdt),
           cashbackLedger,
-          settlementRecord: pda.settlementRecord(orderId),
+          settlementRecord: pda.settlementRecord(matchId),
           assetTokenProgram: TOKEN_PROGRAM,
           paymentTokenProgram: TOKEN_PROGRAM,
           systemProgram: SystemProgram.programId,

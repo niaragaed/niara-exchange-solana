@@ -56,7 +56,7 @@ fn assert_settles(asset_program: Pubkey, payment_program: Pubkey) {
     let m = env.market(asset_program, payment_program);
     let before = snapshot(&env, &m);
 
-    let meta = env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    let meta = env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
 
     let fee = expected_fee(PAYMENT, FEE_BPS);
     let cashback = expected_cashback(fee);
@@ -78,13 +78,13 @@ fn assert_settles(asset_program: Pubkey, payment_program: Pubkey) {
         1_000_000_000 - PAYMENT
     );
 
-    let record: SettlementRecord = env.fetch(&settled_pda(&order_id(1)));
+    let record: SettlementRecord = env.fetch(&settled_pda(&match_id(1)));
     let _ = record.bump;
 
     let events = events::<Settled>(&meta);
     assert_eq!(events.len(), 1);
     let e = &events[0];
-    assert_eq!(e.order_id, order_id(1));
+    assert_eq!(e.match_id, match_id(1));
     assert_eq!(e.asset_mint, m.asset_mint);
     assert_eq!(e.payment_mint, m.payment_mint);
     assert_eq!(e.buyer, m.buyer.pubkey());
@@ -127,7 +127,7 @@ fn settles_token_2022_metadata_mints() {
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
         .unwrap();
     let m = env.trader_pair(asset_mint, payment_mint, issuer, 100, 1_000_000);
-    env.settle(&m, order_id(1), 1, 1_000_000).unwrap();
+    env.settle(&m, match_id(1), 1, 1_000_000).unwrap();
     assert_eq!(env.balance(&m.buyer_asset), 1);
 }
 
@@ -140,7 +140,7 @@ fn transfer_checked_uses_each_mints_own_decimals() {
         let m = env.market(SPL_TOKEN, TOKEN_2022);
         env.set_mint_decimals(&m.asset_mint, asset_decimals);
         env.set_mint_decimals(&m.payment_mint, payment_decimals);
-        env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+        env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
         assert_eq!(env.balance(&m.buyer_asset), ASSETS);
         assert_eq!(
             env.balance(&m.seller_payment),
@@ -154,12 +154,12 @@ fn fee_rounds_up_and_cashback_rounds_down() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     // 30 bps of 10_001 = 30.003 -> fee 31; 20% of 31 = 6.2 -> cashback 6.
-    env.settle(&m, order_id(1), 1, 10_001).unwrap();
+    env.settle(&m, match_id(1), 1, 10_001).unwrap();
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 31);
     assert_eq!(env.balance(&m.seller_payment), 9_970);
     assert_eq!(env.cashback(&m).accrued, 6);
     // 30 bps of 2 -> fee 1, seller gets 1.
-    env.settle(&m, order_id(2), 1, 2).unwrap();
+    env.settle(&m, match_id(2), 1, 2).unwrap();
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 32);
     assert_eq!(env.balance(&m.seller_payment), 9_971);
 }
@@ -171,9 +171,9 @@ fn rejects_fill_that_leaves_the_seller_nothing() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     let before = snapshot(&env, &m);
-    let res = env.settle(&m, order_id(1), 1, 1);
+    let res = env.settle(&m, match_id(1), 1, 1);
     assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
-    assert_untouched(&env, &m, before, order_id(1));
+    assert_untouched(&env, &m, before, match_id(1));
 
     // At the maximum fee (50 bps) the same holds: the fee is ceil(0.5%) = 1.
     let admin = env.admin.insecure_clone();
@@ -181,9 +181,9 @@ fn rejects_fill_that_leaves_the_seller_nothing() {
     env.propose(&admin, change).unwrap();
     env.warp_secs(TIMELOCK_SECS);
     env.execute(&admin, &change).unwrap();
-    let res = env.settle(&m, order_id(2), 1, 1);
+    let res = env.settle(&m, match_id(2), 1, 1);
     assert_custom_err(res, ExchangeError::ZeroSellerProceeds);
-    env.settle(&m, order_id(3), 1, 2).unwrap();
+    env.settle(&m, match_id(3), 1, 2).unwrap();
     assert_eq!(env.balance(&m.seller_payment), 1);
 
     // With a zero fee a 1-unit fill is fine: the seller receives it all.
@@ -191,7 +191,7 @@ fn rejects_fill_that_leaves_the_seller_nothing() {
     env.propose(&admin, change).unwrap();
     env.warp_secs(TIMELOCK_SECS);
     env.execute(&admin, &change).unwrap();
-    env.settle(&m, order_id(4), 1, 1).unwrap();
+    env.settle(&m, match_id(4), 1, 1).unwrap();
     assert_eq!(env.balance(&m.seller_payment), 2);
 }
 
@@ -205,7 +205,7 @@ fn zero_fee_after_timelocked_change() {
     env.execute(&admin, &change).unwrap();
 
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
-    let meta = env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    let meta = env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
     assert_eq!(env.balance(&m.seller_payment), PAYMENT);
     assert_eq!(env.balance(&fee_vault_pda(&m.payment_mint)), 0);
     let e = &events::<Settled>(&meta)[0];
@@ -224,34 +224,34 @@ fn partial_fills_draw_on_one_delegation() {
         .unwrap();
     let m = env.trader_pair(asset_mint, payment_mint, issuer, 10, 1_000_000);
 
-    env.settle(&m, order_id(1), 4, 400_000).unwrap();
-    env.settle(&m, order_id(2), 6, 600_000).unwrap();
+    env.settle(&m, match_id(1), 4, 400_000).unwrap();
+    env.settle(&m, match_id(2), 6, 600_000).unwrap();
     assert_eq!(env.balance(&m.buyer_asset), 10);
     // Exhausted: the token program clears a delegate whose amount reaches 0.
     assert_eq!(env.token_account(&m.seller_asset).delegate, None.into());
     let before = snapshot(&env, &m);
-    let res = env.settle(&m, order_id(3), 1, 1);
+    let res = env.settle(&m, match_id(3), 1, 1);
     assert_custom_err(res, ExchangeError::DelegateNotSet);
-    assert_untouched(&env, &m, before, order_id(3));
+    assert_untouched(&env, &m, before, match_id(3));
 }
 
 // ---- replay protection ------------------------------------------------------
 
 #[test]
-fn same_order_id_cannot_settle_twice() {
+fn same_match_id_cannot_settle_twice() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
-    env.settle(&m, order_id(7), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(7), ASSETS, PAYMENT).unwrap();
     let before = snapshot(&env, &m);
     // Same id, still within the delegated amounts.
-    let res = env.settle(&m, order_id(7), ASSETS, PAYMENT);
-    assert!(res.is_err(), "replayed order_id settled again");
+    let res = env.settle(&m, match_id(7), ASSETS, PAYMENT);
+    assert!(res.is_err(), "replayed match_id settled again");
     assert_eq!(snapshot(&env, &m), before);
     // The id is global: another market cannot reuse it either.
     let other = env.market(SPL_TOKEN, SPL_TOKEN);
-    assert!(env.settle(&other, order_id(7), ASSETS, PAYMENT).is_err());
+    assert!(env.settle(&other, match_id(7), ASSETS, PAYMENT).is_err());
     // A fresh id goes through.
-    env.settle(&m, order_id(8), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(8), ASSETS, PAYMENT).unwrap();
 }
 
 /// An all-zero match id is an unset field, never a real UUID: `settle` refuses
@@ -261,7 +261,7 @@ fn rejects_zero_match_id() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     let zero = [0u8; 16];
-    assert_eq!(order_id(0), zero);
+    assert_eq!(match_id(0), zero);
     let before = snapshot(&env, &m);
     let res = env.settle(&m, zero, ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::ZeroMatchId);
@@ -293,10 +293,10 @@ fn only_the_settlement_operator_can_settle() {
     for intruder in [env.funded_keypair(), env.admin.insecure_clone(), m.buyer.insecure_clone()] {
         let mut accounts = env.settle_accounts(&m);
         accounts.operator = intruder.pubkey();
-        let res = env.settle_with(&intruder, &accounts, order_id(1), ASSETS, PAYMENT);
+        let res = env.settle_with(&intruder, &accounts, match_id(1), ASSETS, PAYMENT);
         assert_custom_err(res, ExchangeError::Unauthorized);
     }
-    assert_untouched(&env, &m, before, order_id(1));
+    assert_untouched(&env, &m, before, match_id(1));
 }
 
 #[test]
@@ -306,11 +306,11 @@ fn settle_reverts_while_paused() {
     let admin = env.admin.insecure_clone();
     env.pause(&admin).unwrap();
     let before = snapshot(&env, &m);
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::Paused);
-    assert_untouched(&env, &m, before, order_id(1));
+    assert_untouched(&env, &m, before, match_id(1));
     env.unpause(&admin).unwrap();
-    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
 }
 
 // ---- amounts and counterparties ---------------------------------------------
@@ -321,10 +321,10 @@ fn rejects_zero_amounts() {
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     let before = snapshot(&env, &m);
     for (a, p) in [(0, PAYMENT), (ASSETS, 0), (0, 0)] {
-        let res = env.settle(&m, order_id(1), a, p);
+        let res = env.settle(&m, match_id(1), a, p);
         assert_custom_err(res, ExchangeError::ZeroAmount);
     }
-    assert_untouched(&env, &m, before, order_id(1));
+    assert_untouched(&env, &m, before, match_id(1));
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn rejects_buyer_equal_to_seller() {
     a.buyer_asset = own_asset_in;
     a.buyer_payment = own_payment;
     let operator = env.operator.insecure_clone();
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::SelfTrade);
 }
 
@@ -359,7 +359,7 @@ fn rejects_vault_authority_as_counterparty() {
     // The fee vault itself as the buyer's payment account: Anchor refuses the
     // same mutable account twice before the handler runs.
     a.buyer_payment = fee_vault_pda(&m.payment_mint);
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::ConstraintDuplicateMutableAccount);
 
     // Any other vault-owned account, even "delegated" to the vault.
@@ -368,7 +368,7 @@ fn rejects_vault_authority_as_counterparty() {
         t.delegate = Some(vault).into();
         t.delegated_amount = PAYMENT;
     });
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::InvalidCounterparty);
 
     // And as the seller.
@@ -376,7 +376,7 @@ fn rejects_vault_authority_as_counterparty() {
     a.seller = vault;
     a.seller_asset = env.create_token_account(SPL_TOKEN, m.asset_mint, vault, ASSETS);
     a.seller_payment = env.create_token_account(SPL_TOKEN, m.payment_mint, vault, 0);
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::InvalidCounterparty);
 }
 
@@ -390,13 +390,13 @@ fn rejects_asset_listing_that_is_not_approved() {
     let before = snapshot(&env, &m);
 
     env.suspend(&authority, m.asset_mint).unwrap();
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::ListingNotApproved);
 
     env.delist(&authority, m.asset_mint).unwrap();
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::ListingNotApproved);
-    assert_untouched(&env, &m, before, order_id(1));
+    assert_untouched(&env, &m, before, match_id(1));
 }
 
 #[test]
@@ -411,7 +411,7 @@ fn rejects_pending_asset_listing() {
     env.init_cashback_ledger(&payer, asset_mint, payment_mint)
         .unwrap();
     let m = env.trader_pair(asset_mint, payment_mint, issuer, 100, PAYMENT);
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::ListingNotApproved);
 }
 
@@ -432,9 +432,9 @@ fn rejects_fixed_income_and_credit_assets() {
             .unwrap();
         let m = env.trader_pair(asset_mint, payment_mint, issuer, 100, PAYMENT);
         let before = snapshot(&env, &m);
-        let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+        let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
         assert_custom_err(res, ExchangeError::WrongTradingMode);
-        assert_untouched(&env, &m, before, order_id(1));
+        assert_untouched(&env, &m, before, match_id(1));
     }
 }
 
@@ -451,7 +451,7 @@ fn rejects_currency_as_asset() {
 
     let nobody = env.funded_keypair();
     let m = env.trader_pair(asset_currency, payment_mint, nobody, 100, PAYMENT);
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::AccountNotInitialized);
     assert!(!env.exists(&m.cashback_ledger()));
 }
@@ -465,13 +465,13 @@ fn rejects_payment_mint_that_is_not_an_approved_currency() {
     let before = snapshot(&env, &m);
 
     env.suspend(&authority, m.payment_mint).unwrap();
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::InvalidPaymentMint);
 
     env.delist(&authority, m.payment_mint).unwrap();
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::InvalidPaymentMint);
-    assert_untouched(&env, &m, before, order_id(1));
+    assert_untouched(&env, &m, before, match_id(1));
 }
 
 /// Fees are always in USDT, so `settle` pays only in the fee mint: neither
@@ -492,7 +492,7 @@ fn rejects_payment_mint_that_is_not_the_fee_mint() {
         a.fee_ledger = fee_ledger_pda(&m.payment_mint);
         a.fee_vault = fee_vault_pda(&m.payment_mint);
         a.cashback_ledger = m.cashback_ledger();
-        let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+        let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
         assert_custom_err(res, ExchangeError::NotFeeMint);
         assert_eq!(env.balance(&other.buyer_payment), PAYMENT);
     }
@@ -501,7 +501,7 @@ fn rejects_payment_mint_that_is_not_the_fee_mint() {
         assert!(!env.exists(&fee_vault_pda(&mint)));
         assert!(!env.exists(&fee_ledger_pda(&mint)));
     }
-    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
 }
 
 #[test]
@@ -513,7 +513,7 @@ fn rejects_unlisted_mints() {
     let (other, _) = env.listed_equity(SPL_TOKEN);
     a.asset_listing = listing_pda(&other);
     let operator = env.operator.insecure_clone();
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::ConstraintSeeds);
 }
 
@@ -543,9 +543,9 @@ fn rechecks_extension_allowlist_on_both_mints() {
         };
         inject_extension(&mut env, &mint, ExtensionType::PermanentDelegate, decimals);
         let before = snapshot(&env, &m);
-        let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+        let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
         assert_custom_err(res, ExchangeError::UnsupportedMintExtension);
-        assert_untouched(&env, &m, before, order_id(1));
+        assert_untouched(&env, &m, before, match_id(1));
     }
 }
 
@@ -554,7 +554,7 @@ fn rechecks_asset_freeze_authority() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     env.set_freeze_authority(&m.asset_mint, Some(Pubkey::new_unique()));
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, ExchangeError::FreezeAuthorityNotAllowed);
 }
 
@@ -564,7 +564,7 @@ fn payment_mint_with_freeze_authority_settles() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     env.set_freeze_authority(&m.payment_mint, Some(Pubkey::new_unique()));
-    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
 }
 
 // ---- delegations --------------------------------------------------------------
@@ -581,9 +581,9 @@ fn rejects_missing_or_foreign_delegate() {
                 a.delegated_amount = if delegate.is_some() { u64::MAX } else { 0 };
             });
             let before = snapshot(&env, &m);
-            let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+            let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
             assert_custom_err(res, ExchangeError::DelegateNotSet);
-            assert_untouched(&env, &m, before, order_id(1));
+            assert_untouched(&env, &m, before, match_id(1));
         }
     }
 }
@@ -600,9 +600,9 @@ fn rejects_insufficient_delegation() {
         };
         env.update_token_account(&account, |a| a.delegated_amount = needed - 1);
         let before = snapshot(&env, &m);
-        let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+        let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
         assert_custom_err(res, ExchangeError::InsufficientDelegation);
-        assert_untouched(&env, &m, before, order_id(1));
+        assert_untouched(&env, &m, before, match_id(1));
     }
 }
 
@@ -614,8 +614,8 @@ fn reverts_atomically_when_a_later_leg_fails() {
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     env.update_token_account(&m.buyer_payment, |a| a.amount = PAYMENT - 1);
     let before = snapshot(&env, &m);
-    assert!(env.settle(&m, order_id(1), ASSETS, PAYMENT).is_err());
-    assert_untouched(&env, &m, before, order_id(1));
+    assert!(env.settle(&m, match_id(1), ASSETS, PAYMENT).is_err());
+    assert_untouched(&env, &m, before, match_id(1));
 }
 
 #[test]
@@ -624,8 +624,8 @@ fn reverts_when_an_account_is_frozen() {
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
     env.update_token_account(&m.seller_payment, |a| a.state = AccountState::Frozen);
     let before = snapshot(&env, &m);
-    assert!(env.settle(&m, order_id(1), ASSETS, PAYMENT).is_err());
-    assert_untouched(&env, &m, before, order_id(1));
+    assert!(env.settle(&m, match_id(1), ASSETS, PAYMENT).is_err());
+    assert_untouched(&env, &m, before, match_id(1));
 }
 
 // ---- token account validation -------------------------------------------------
@@ -643,7 +643,7 @@ fn rejects_destination_owned_by_someone_else() {
             a.buyer_asset = env.create_token_account(SPL_TOKEN, m.asset_mint, thief, 0);
         }
         let operator = env.operator.insecure_clone();
-        let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+        let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
         assert_custom_err(res, AnchorError::ConstraintTokenOwner);
     }
 }
@@ -656,7 +656,7 @@ fn rejects_token_account_of_the_wrong_mint() {
     // Payment-mint account passed as the buyer's asset account.
     a.buyer_asset = env.create_token_account(SPL_TOKEN, m.payment_mint, m.buyer.pubkey(), 0);
     let operator = env.operator.insecure_clone();
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::ConstraintTokenMint);
 }
 
@@ -668,7 +668,7 @@ fn rejects_wrong_token_program() {
     a.asset_program = SPL_TOKEN;
     let operator = env.operator.insecure_clone();
     assert!(env
-        .settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT)
+        .settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT)
         .is_err());
 }
 
@@ -679,7 +679,7 @@ fn rejects_foreign_fee_vault() {
     let mut a = env.settle_accounts(&m);
     a.fee_vault = env.create_token_account(SPL_TOKEN, m.payment_mint, vault_authority(), 0);
     let operator = env.operator.insecure_clone();
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::ConstraintSeeds);
 }
 
@@ -691,7 +691,7 @@ fn rejects_cashback_ledger_of_another_listing() {
     let mut a = env.settle_accounts(&m);
     a.cashback_ledger = other.cashback_ledger();
     let operator = env.operator.insecure_clone();
-    let res = env.settle_with(&operator, &a, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle_with(&operator, &a, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::ConstraintSeeds);
 }
 
@@ -701,7 +701,7 @@ fn requires_an_initialized_cashback_ledger() {
     let (asset_mint, issuer) = env.listed_equity(SPL_TOKEN);
     let payment_mint = env.fee_currency(SPL_TOKEN);
     let m = env.trader_pair(asset_mint, payment_mint, issuer, 100, PAYMENT);
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::AccountNotInitialized);
 }
 
@@ -718,9 +718,9 @@ fn requires_the_fee_vault() {
     let payer = env.admin.insecure_clone();
     env.init_cashback_ledger(&payer, asset_mint, usdt).unwrap();
     let m = env.trader_pair(asset_mint, usdt, issuer, 100, PAYMENT);
-    let res = env.settle(&m, order_id(1), ASSETS, PAYMENT);
+    let res = env.settle(&m, match_id(1), ASSETS, PAYMENT);
     assert_custom_err(res, AnchorError::AccountNotInitialized);
 
     env.init_fee_vault(&payer, usdt).unwrap();
-    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
 }

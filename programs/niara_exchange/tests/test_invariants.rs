@@ -899,7 +899,7 @@ impl World {
         intruder: bool,
     ) -> Result<(), TestCaseError> {
         let (asset_index, payment_index) = PAIRS[pair];
-        let order = order_id(id as u128);
+        let mid = match_id(id as u128);
         let m = &self.pairs[pair];
         let accounts = self.env.settle_accounts(m);
         let watched = [
@@ -910,7 +910,7 @@ impl World {
             fee_vault_pda(&m.payment_mint),
         ];
         let before: Vec<u64> = watched.iter().map(|a| self.balance_or_zero(a)).collect();
-        let record_existed = self.env.exists(&settled_pda(&order));
+        let record_existed = self.env.exists(&settled_pda(&mid));
         let config = self.config();
         let asset_listing = self.listing(asset_index);
         let payment_listing = self.listing(payment_index);
@@ -919,21 +919,21 @@ impl World {
             let signer = self.intruder.insecure_clone();
             let mut a = accounts;
             a.operator = signer.pubkey();
-            self.env.settle_with(&signer, &a, order, assets, payment)
+            self.env.settle_with(&signer, &a, mid, assets, payment)
         } else {
             let operator = self.env.operator.insecure_clone();
-            self.env.settle_with(&operator, &accounts, order, assets, payment)
+            self.env.settle_with(&operator, &accounts, mid, assets, payment)
         };
         let after: Vec<u64> = watched.iter().map(|a| self.balance_or_zero(a)).collect();
 
         let meta = match res {
             Err(_) => {
                 SETTLE_REJECTED.fetch_add(1, Relaxed);
-                if order == [0u8; 16] {
+                if mid == [0u8; 16] {
                     ZERO_ID_REJECTED.fetch_add(1, Relaxed);
                 }
                 prop_assert_eq!(&before, &after, "failed settle moved funds");
-                prop_assert_eq!(self.env.exists(&settled_pda(&order)), record_existed);
+                prop_assert_eq!(self.env.exists(&settled_pda(&mid)), record_existed);
                 return Ok(());
             }
             Ok(meta) => meta,
@@ -942,8 +942,8 @@ impl World {
 
         prop_assert!(!intruder, "settled by a non-operator");
         prop_assert!(!config.paused, "settled while paused");
-        prop_assert!(!record_existed, "order_id settled twice");
-        prop_assert!(order != [0u8; 16], "settled a zero match id");
+        prop_assert!(!record_existed, "match_id settled twice");
+        prop_assert!(mid != [0u8; 16], "settled a zero match id");
         prop_assert!(assets > 0 && payment > 0);
         // Invariant 3.
         prop_assert_eq!(asset_listing.status, ListingStatus::Approved);

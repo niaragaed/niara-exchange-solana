@@ -21,7 +21,7 @@ const PAYMENT: u64 = 25_000_000;
 fn accrued() -> (Env, Market, Pubkey) {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
-    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
     let dest = env.create_token_account(SPL_TOKEN, m.payment_mint, m.issuer.pubkey(), 0);
     (env, m, dest)
 }
@@ -91,7 +91,7 @@ fn cashback_keeps_accruing_while_frozen() {
     let authority = authority(&env);
     env.freeze_cashback(&authority, m.asset_mint).unwrap();
     let before = env.cashback(&m).accrued;
-    env.settle(&m, order_id(2), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(2), ASSETS, PAYMENT).unwrap();
     let accrued = env.cashback(&m).accrued;
     assert_eq!(accrued, 2 * before);
 
@@ -117,8 +117,8 @@ fn freeze_is_per_listing() {
     env.init_cashback_ledger(&payer, other_mint, m.payment_mint)
         .unwrap();
     let other = env.trader_pair(other_mint, m.payment_mint, other_issuer, 1_000, 1_000_000_000);
-    env.settle(&m, order_id(1), ASSETS, PAYMENT).unwrap();
-    env.settle(&other, order_id(2), ASSETS, PAYMENT).unwrap();
+    env.settle(&m, match_id(1), ASSETS, PAYMENT).unwrap();
+    env.settle(&other, match_id(2), ASSETS, PAYMENT).unwrap();
     let dest = env.create_token_account(SPL_TOKEN, m.payment_mint, m.issuer.pubkey(), 0);
     let other_dest =
         env.create_token_account(SPL_TOKEN, m.payment_mint, other.issuer.pubkey(), 0);

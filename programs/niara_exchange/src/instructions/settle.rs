@@ -21,7 +21,7 @@ use crate::{
 
 #[event_cpi]
 #[derive(Accounts)]
-#[instruction(order_id: [u8; 16])]
+#[instruction(match_id: [u8; 16])]
 pub struct Settle<'info> {
     /// Pays the rent of the `SettlementRecord`.
     #[account(mut)]
@@ -123,7 +123,7 @@ pub struct Settle<'info> {
         init,
         payer = settlement_operator,
         space = 8 + SettlementRecord::INIT_SPACE,
-        seeds = [SETTLED_SEED, order_id.as_ref()],
+        seeds = [SETTLED_SEED, match_id.as_ref()],
         bump
     )]
     pub settlement_record: Box<Account<'info, SettlementRecord>>,
@@ -133,20 +133,20 @@ pub struct Settle<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// `order_id` is the off-chain **match** (fill) id, a UUID: one maker order can
+/// `match_id` is the off-chain **match** (fill) id, a UUID: one maker order can
 /// be filled by several matches, each settled once.
 /// `payment_amount` is in raw units of the payment mint; the program does no
 /// price conversion.
 pub fn handle_settle(
     ctx: Context<Settle>,
-    order_id: [u8; 16],
+    match_id: [u8; 16],
     asset_amount: u64,
     payment_amount: u64,
 ) -> Result<()> {
     let accounts = &ctx.accounts;
     accounts.config.require_not_paused()?;
     // An all-zero id is an unset field, never a real match UUID.
-    require!(order_id != [0u8; 16], ExchangeError::ZeroMatchId);
+    require!(match_id != [0u8; 16], ExchangeError::ZeroMatchId);
     require!(
         asset_amount > 0 && payment_amount > 0,
         ExchangeError::ZeroAmount
@@ -243,7 +243,7 @@ pub fn handle_settle(
 
     // 5. Event.
     emit_cpi!(Settled {
-        order_id,
+        match_id,
         asset_mint: ctx.accounts.asset_mint.key(),
         payment_mint: ctx.accounts.payment_mint.key(),
         buyer,

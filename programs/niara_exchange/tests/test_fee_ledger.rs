@@ -153,7 +153,7 @@ fn settle_records_gross_fee_and_cashback() {
     let mut cashback = 0;
     // 2 is the smallest payment that leaves the seller something (fee 1).
     for (i, payment) in [2u64, 10_001, 25_000_000, 333_333].into_iter().enumerate() {
-        env.settle(&m, order_id(i as u128 + 1), 1, payment).unwrap();
+        env.settle(&m, match_id(i as u128 + 1), 1, payment).unwrap();
         fees += fee_of(payment);
         cashback += cashback_of(fee_of(payment));
         let ledger = env.fee_ledger(&m.payment_mint);
@@ -176,8 +176,8 @@ fn one_ledger_for_every_listing_and_both_modes() {
     let brl = env.p2p(AssetClass::Currency, TOKEN_2022, SPL_TOKEN);
     assert_eq!((a.payment_mint, b.payment_mint, bond.payment_mint), (env.fee_mint, env.fee_mint, env.fee_mint));
 
-    env.settle(&a, order_id(1), 1, 1_000_000).unwrap();
-    env.settle(&b, order_id(2), 1, 2_000_000).unwrap();
+    env.settle(&a, match_id(1), 1, 1_000_000).unwrap();
+    env.settle(&b, match_id(2), 1, 2_000_000).unwrap();
     env.open_deal(&bond, deal_id(1), DealSide::Sell, 1, 5_000_000).unwrap();
     env.accept_deal(&bond, deal_id(1)).unwrap();
     env.open_deal(&brl, deal_id(1), DealSide::Buy, 1_000, 7_000_000).unwrap();
@@ -202,7 +202,7 @@ fn one_ledger_for_every_listing_and_both_modes() {
 fn donations_to_the_vault_are_not_accounted() {
     let mut env = Env::initialized();
     let m = env.market(SPL_TOKEN, SPL_TOKEN);
-    env.settle(&m, order_id(1), 1, 1_000_000).unwrap();
+    env.settle(&m, match_id(1), 1, 1_000_000).unwrap();
     let ledger_before = env.fee_ledger(&m.payment_mint);
 
     env.donate_to_fee_vault(m.payment_mint, 500);
@@ -235,7 +235,7 @@ fn fee_mint_switch_keeps_old_balances_withdrawable() {
     let mut env = Env::initialized();
     let old = env.market(SPL_TOKEN, SPL_TOKEN);
     let old_usdt = old.payment_mint;
-    env.settle(&old, order_id(1), 1, 10_000_000).unwrap();
+    env.settle(&old, match_id(1), 1, 10_000_000).unwrap();
     let bond = env.p2p(AssetClass::FixedIncome, SPL_TOKEN, SPL_TOKEN);
     for n in [1, 2] {
         env.open_deal(&bond, deal_id(n), DealSide::Sell, 1, 1_000_000).unwrap();
@@ -249,11 +249,11 @@ fn fee_mint_switch_keeps_old_balances_withdrawable() {
 
     // Nothing trades until the new fee vault exists, and the old mint never
     // trades again.
-    let res = env.settle(&old, order_id(2), 1, 10_000_000);
+    let res = env.settle(&old, match_id(2), 1, 10_000_000);
     assert_custom_err(res, ExchangeError::NotFeeMint);
     assert_eq!(env.fee_currency(TOKEN_2022), new_usdt);
     assert_empty_vault_and_ledger(&env, &new_usdt, TOKEN_2022);
-    let res = env.settle(&old, order_id(2), 1, 10_000_000);
+    let res = env.settle(&old, match_id(2), 1, 10_000_000);
     assert_custom_err(res, ExchangeError::NotFeeMint);
 
     // Cashback ledgers are keyed by the current fee mint.
@@ -274,7 +274,7 @@ fn fee_mint_switch_keeps_old_balances_withdrawable() {
     // New trades collect into the new vault only.
     let issuer = old.issuer.insecure_clone();
     let fresh = env.trader_pair(old.asset_mint, new_usdt, issuer, 10, 1_000_000_000);
-    env.settle(&fresh, order_id(3), 1, 20_000_000).unwrap();
+    env.settle(&fresh, match_id(3), 1, 20_000_000).unwrap();
     assert_eq!(env.fee_ledger(&new_usdt).fees_collected, fee_of(20_000_000));
     assert_eq!(env.fee_ledger(&old_usdt).fees_collected, old_ledger.fees_collected);
     env.assert_vault_matches_ledger(&new_usdt);

@@ -1347,16 +1347,33 @@ Vision, not v1 scope.
 - A wallet is created for each user at signup, after KYC.
 - Users who prefer can connect their own wallet instead, from the list of
   wallets the Register supports.
-- **Gate: the key custody model comes first.** Before this is built, this
-  spec must state who holds which key shares (the user's device, Niara, a
-  wallet-infrastructure provider, a recovery service), and answer at least:
-  can Niara, alone or with a provider it contracts, sign for the user? How
-  does a user recover after losing the device, and who takes part? Can the
-  user move to another wallet without Niara's cooperation?
-- "Self-custody" is a claim users and regulators will test. If Niara alone,
-  or Niara with a provider it contracts, can move a user's funds, the wallet
-  is custodial and is not called self-custody; holding users' assets is
-  then part of the VASP assessment (§9.11).
+- **Custody model — decided: non-custodial.** The Niara wallet is
+  non-custodial, and **Niara holds no part of any key**: no key, no key
+  share, no recovery share, no backup it can decrypt. Niara cannot sign for
+  a user, alone or with anyone it contracts, and a user can move to another
+  wallet without Niara's cooperation.
+- **Recovery works without Niara.** Since Niara holds nothing, losing the
+  device must be recoverable by the user alone or with parties the user
+  picks. Acceptable mechanisms include:
+  - **synced passkeys** (the platform's passkey sync, under the user's own
+    account);
+  - an **encrypted backup the user holds** (only the user can decrypt it);
+  - **guardian recovery with a timelock**: guardians the user picks approve
+    a key change, which takes effect only after a delay during which the
+    current key can cancel it. These recovery guardians are unrelated to
+    the protocol `GUARDIAN` role (§9.1), and Niara is never one of them.
+
+  Which mechanisms ship, and in what combination, is to be designed.
+- **Embedded-wallet providers must match this model.** Any
+  wallet-infrastructure provider used to create wallets at signup must
+  give Niara no key share and no signing or recovery power, and its own
+  recovery must not route through Niara. A provider that cannot meet this
+  is not used.
+- "Self-custody" is a claim users and regulators will test, and this model
+  is what makes it true. Any design change that lets Niara, alone or with a
+  provider it contracts, move a user's funds makes the wallet custodial: it
+  is then not called self-custody, and holding users' assets becomes part of
+  the VASP assessment (§9.11).
 
 ### 9.9 Target chains
 

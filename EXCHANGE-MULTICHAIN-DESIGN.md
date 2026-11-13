@@ -3,6 +3,7 @@
 Status: DRAFT for design freeze · Target: Solana Foundation interview (4–6 weeks)
 Chains in scope: Solana Devnet (priority), Ethereum Sepolia, Base Sepolia
 Roadmap only (not in v1): Robinhood Chain Testnet, HyperEVM Testnet, Tempo Testnet
+(target chains: §9.9)
 
 > Everything here runs on testnets with test tokens. No real assets, no real money,
 > no regulatory authorization. Every screen and doc must say so.
@@ -591,20 +592,22 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
 
 Security and token-lifecycle work (guardian role, issuer compromise and
 recovery, Niara-created mints with a recovery delegate, cashback protection,
-the production cybersecurity program) is in §9.
+the production cybersecurity program) is in §9, and so is the product vision
+(neobank services, wallet service, target chains, price oracle, regulatory
+dependencies).
 
 - Fixed income / credit **lifecycle**: coupon payments, amortization, maturity
   redemption, default handling. In v1 these tokens trade but do not pay out;
   the lifecycle (snapshot of holders + on-chain distribution) is roadmap.
 - FX pricing feeds: P2P deals in `Currency` use the rate the two parties agree;
-  no oracle in v1.
+  no oracle in v1 (roadmap: §9.10).
 - **Multi-currency payment.** v1 charges every fee in USDT, so `settle` pays
   only in USDT and a `Currency` deal needs a USDT leg (§3.4). Paying in other
   currencies (BRL ↔ EUR deals, equities priced in BRL) while still charging
   the fee and the cashback in USDT needs a **price oracle** to convert the fee
   on-chain (e.g. Pyth or Switchboard feeds, with staleness and confidence
   checks), or per-currency fee vaults with their own cashback ledgers (which
-  v1 removed). Roadmap. In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
+  v1 removed). Roadmap (§9.10). In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
   VASP rules), which matters for production but not for testnet.
 - **Bitmap replay protection.** Each settlement creates a `SettlementRecord`
   that is never closed: ~0.00095 SOL of rent per settlement (rent-exempt
@@ -897,11 +900,14 @@ settle, Solana P2P escrow, issuer cashback, honest labeling.
 
 ---
 
-## 9. Roadmap — security, token lifecycle and FX
+## 9. Roadmap — security, token lifecycle and product vision
 
 Not in v1 unless marked done. §9.1 to §9.6 are ordered by what an incident
-would need first: contain it, recover from it, prove what happened. §9.7 is a
-product item.
+would need first: contain it, recover from it, prove what happened. §9.7 to
+§9.11 are product vision, not v1 scope. They claim no regulatory status:
+Niara holds no authorization for any of these services (the testnet notice
+at the top applies), and none is offered before counsel has assessed its
+dependencies (§9.11).
 
 ### 9.1 Containment: "pause fast, resume slow"
 
@@ -1135,10 +1141,35 @@ listing does not stop it.
 - Periodic penetration tests (frontend, API, infrastructure).
 - **SOC 2** for the off-chain stack, already planned for Register.
 
-### 9.7 FX for neobank services
+### 9.7 Neobank inside the Exchange
 
-Stablecoin FX for neobank services, with stablecoins for **BRL, EUR, CHF and
-GBP**, is a separate service from securities trading.
+Vision, not v1 scope: banking-style services in the same app as the
+Exchange, built on the user's self-custody wallet (§9.8). "Neobank" names
+the product idea; it does not claim that Niara is, or is authorized as, a
+bank or a payment institution (§9.11). **Securities trading always settles
+in USDT**, and no service below changes that (see FX).
+
+**Services.**
+- **Digital cards settled on-chain** from the user's self-custody wallet.
+  Needs a card issuing partner (§9.11) and a spending model that leaves the
+  funds in the wallet until a purchase settles. Design to be done.
+- **Business solutions** for companies. Scope to be defined.
+- **Tokenized receivables anticipation**: a business sells future
+  receivables at a discount for immediate payment. Pricing needs the oracle
+  (§9.10); card receivables need registration (§9.11). How these tokens map
+  to the `Credit` asset class (§1) is to be designed.
+- **Card terminal (POS)** that records each transaction on-chain, with a
+  fee of 0.1% to 0.5% of the transaction. Needs the payment-institution
+  assessment (§9.11).
+- **Payroll**: a company registers the destination self-custody wallets and
+  schedules monthly payments. On-chain programs do not run on a schedule, so
+  each monthly run must be triggered by a transaction (the company signing,
+  or a crank releasing funds the company deposited in advance). Design to be
+  done; needs the labor-law assessment (§9.11).
+- **FX** with stablecoins for BRL, EUR, CHF and GBP (below).
+
+**FX.** Stablecoin FX for neobank services, with stablecoins for **BRL,
+EUR, CHF and GBP**, is a separate service from securities trading.
 
 - **Securities always settle in USDT**, and this does not change: `settle`
   takes only the fee mint as payment, and `FixedIncome` / `Credit` deals
@@ -1146,8 +1177,66 @@ GBP**, is a separate service from securities trading.
 - v1's `Currency` P2P deals are the closest thing today, but every one needs
   a USDT leg: BRL ↔ USDT works, BRL ↔ EUR is rejected (`NotFeeMint`).
   Exchanging two non-USDT stablecoins (e.g. BRL ↔ EUR, CHF ↔ GBP) needs what
-  §3.10 lists for multi-currency payment: a price oracle to charge the fee in
-  USDT, or fees and fee vaults in each currency, plus `Currency` listings for
-  each stablecoin.
+  §3.10 lists for multi-currency payment: a price oracle (§9.10) to charge
+  the fee in USDT, or fees and fee vaults in each currency, plus `Currency`
+  listings for each stablecoin.
 - FX is regulated separately (in Brazil, by the BCB: Lei 14.286/2021 and the
-  VASP rules, §3.10), so it gets its own legal review before production.
+  VASP rules, §3.10), so it gets its own legal review before production
+  (§9.11).
+
+### 9.8 Niara Wallet-as-a-Service
+
+Vision, not v1 scope.
+
+- A wallet is created for each user at signup, after KYC.
+- Users who prefer can connect their own wallet instead, from the list of
+  wallets the Register supports.
+- **Gate: the key custody model comes first.** Before this is built, this
+  spec must state who holds which key shares (the user's device, Niara, a
+  wallet-infrastructure provider, a recovery service), and answer at least:
+  can Niara, alone or with a provider it contracts, sign for the user? How
+  does a user recover after losing the device, and who takes part? Can the
+  user move to another wallet without Niara's cooperation?
+- "Self-custody" is a claim users and regulators will test. If Niara alone,
+  or Niara with a provider it contracts, can move a user's funds, the wallet
+  is custodial and is not called self-custody; holding users' assets is
+  then part of the VASP assessment (§9.11).
+
+### 9.9 Target chains
+
+Target chains: **Ethereum, Solana, Base, Hyperliquid (HyperEVM), Robinhood
+Chain and Tempo**. v1 runs on Solana Devnet, Ethereum Sepolia and Base
+Sepolia only; the other three have no v1 deployment.
+
+- HyperEVM, Robinhood Chain and Tempo would reuse the EVM contracts (§4),
+  after a per-chain check of EVM compatibility, gas model and finality, and
+  with their chain ids added to the deploy scripts' chain guards (§4).
+- Each new chain extends the `SettlementAdapter` chain list (§2) and the
+  Register indexer (§6).
+- No mainnet deployment on any chain before the gates of §9.6 (multisig,
+  audit).
+
+### 9.10 Price oracle
+
+Price feeds (for example Pyth and Chainlink) for three uses: paying fees in
+currencies other than USDT (§3.10, multi-currency payment), FX between
+non-USDT stablecoins (§9.7) and pricing tokenized receivables (§9.7).
+**Design to be done.** It must at least settle which feed serves each pair
+on each chain, the staleness and confidence limits, what an instruction does
+when a price is stale or missing, and who may change a feed, with which
+delay.
+
+### 9.11 Regulatory dependencies
+
+To assess with counsel **before each service** is built for production or
+offered. Until that assessment is done for a service, the service is not
+offered, and no screen, doc or pitch says or implies that Niara is licensed
+or authorized for it.
+
+| Dependency | Service it gates |
+|---|---|
+| A card issuing partner | Digital cards (§9.7) |
+| Payment-institution rules | Card terminal (POS) (§9.7) |
+| Registration of card receivables | Tokenized receivables anticipation (§9.7) |
+| Stablecoin payroll under Brazilian labor law | Payroll (§9.7) |
+| Authorization as a virtual-asset service provider (VASP) | Which services need it is part of the assessment; FX (§9.7) and the wallet service (§9.8) are the first to check |

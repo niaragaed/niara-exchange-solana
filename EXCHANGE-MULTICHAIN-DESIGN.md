@@ -53,9 +53,12 @@ A peer-to-peer tokenized securities exchange with **self-custody** and **curated
      only the cap is enforced: `fee_bps ≤ MAX_FEE_BPS = 50` (0.5%). The 0.1%
      floor is pricing policy; the program accepts any rate from 0 to 50 bps.
    - **Listing fee**, once per listing: 0.1% to 1% of the issuer's valuation,
-     charged **off-chain** in USDT when Niara approves the listing and paid to
-     the treasury; the Register records the payment transaction. The program
-     neither charges nor checks it: `approve_listing` moves no tokens.
+     charged **on-chain** in USDT (§3.13). The listing authority quotes it
+     (`quote_listing`) and the issuer pays it into the fee vault
+     (`pay_listing_fee`); paying is what approves the listing. Only the cap
+     is enforced: `listing_fee_bps ≤ MAX_LISTING_FEE_BPS = 100` (1%); the
+     0.1% floor is pricing policy, as for the trading fee. The valuation is
+     public on-chain.
    - **No custody fee.** Niara never holds the users' assets: tokens stay in
      the owners' wallets, or in a per-deal escrow only while a deal is open
      (§3.5).
@@ -135,16 +138,16 @@ interface SettlementAdapter {
 |---|---|---|
 | `Config` | `["config"]` | `admin`, `listing_authority`, `settlement_operator`, `treasury`, `fee_mint` (the USDT mint: every fee and all cashback are in it, §3.4; set at `initialize_config`, changed only through the timelock), `fee_bps: u16` (≤ `MAX_FEE_BPS = 50`, i.e. 0.5%; §3.4), `cashback_bps: u16` (share **of the fee**, ≤ 10_000), `paused: bool`, `timelock_secs: i64`, `bump` |
 | `PendingChange` | `["pending", kind]` | proposed value, `execute_after: i64` (Clock `unix_timestamp`) |
-| `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `cashback_frozen: bool` (§9.5; false at creation), `bump` |
+| `Listing` | `["listing", asset_mint]` | `asset_mint`, `issuer`, `asset_class` (`Equity`/`FixedIncome`/`Credit`/`Currency`), `status` (`Pending`/`Approved`/`Suspended`/`Delisted`/`Quoted`; `Quoted` is appended last, §3.13), `cashback_eligible`, `doc_hash: [u8;32]` (offering document hash — registered in Niara-Register), `approved_at`, `next_batch_no: u64` (next issuance batch; 1 after `submit_listing`, 0 for `Currency`), `issued: u64` (Σ executed batches), `burned: u64` (Σ `burn_with_reason`), `cashback_frozen: bool` (§9.5; false at creation), the listing-fee quote (§3.13): `valuation: u64`, `listing_fee_bps: u16`, `listing_fee: u64`, `listing_fee_mint`, `quote_expires_at: i64`, `listing_fee_paid: u64` (0 until paid; all six stay 0 for `Currency`), `bump` |
 | `IssuanceBatch` | `["batch", listing, batch_no]` (`batch_no` as `u64` LE) | `listing`, `batch_no`, `amount`, `recipient` (wallet), `doc_hash`, `status` (`Requested`/`Executed`/`Rejected`), `requested_at`, `resolved_at`, `bump`. Never closed: the on-chain issuance record (§3.12) |
 | Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
 | `CashbackLedger` | `["cashback", listing, fee_mint]` | `listing`, `payment_mint` (= the fee mint it was created for), `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` for a cashback-eligible listing and the current `Config.fee_mint`, never lazily inside `settle` |
-| `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`. **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
+| `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross **trading** fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`, `listing_fees_collected` (Σ listing fees paid in this mint, all protocol revenue, §3.13; appended last). **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued + listing_fees_collected − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
 | `SettlementRecord` | `["settled", match_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
 | `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `fee_bps`, `cashback_bps` (the config's rates at `open_deal`, charged at `accept_deal`: the fee is part of the agreed terms, §3.5), `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
 | Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
-| Fee vault | `["fee_vault", fee_mint]` token account, authority = vault authority | **one**, in the fee mint: holds protocol fees + unclaimed cashback (+ unaccounted donations until swept). Created by `init_fee_vault` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `init_fee_vault`. Other currencies have no fee vault: no fee is ever charged in them |
+| Fee vault | `["fee_vault", fee_mint]` token account, authority = vault authority | **one**, in the fee mint: holds trading fees (protocol share + unclaimed cashback) and listing fees (+ unaccounted donations until swept). Created by `init_fee_vault` **after** the mint policy check (the handler creates it with system + `InitializeAccount3` CPIs instead of an Anchor `init`, which would run before the check), so a rejected mint never gets one. Lamports sent to the address beforehand do not block it (top up + allocate + assign, as Anchor's `init` does). A PDA rather than an ATA: anyone can create an ATA, so creating one could be front-run to block `init_fee_vault`. Other currencies have no fee vault: no fee is ever charged in them |
 
 ### 3.3 Instructions
 
@@ -153,11 +156,13 @@ interface SettlementAdapter {
 | `initialize_config` | admin | create `Config`, including `fee_mint` (non-default) |
 | `init_fee_vault` | anyone (payer) | for `Config.fee_mint` only (`NotFeeMint`): run the mint extension allowlist, then create the fee vault `["fee_vault", fee_mint]` and the `FeeLedger` `["fees", fee_mint]`. Called once after `initialize_config`, and once after a timelocked fee-mint change. Emits `FeeVaultInitialized { fee_mint, fee_vault, fee_ledger }` |
 | `submit_listing(asset_class, doc_hash)` | issuer | create `Listing{Pending}` for `Equity`/`FixedIncome`/`Credit`; require `issuer == asset_mint.mint_authority` and `supply == 0`; in the same instruction move the mint authority to the `["mint_authority", asset_mint]` PDA (`set_authority` CPI signed by the issuer) (§3.12) |
-| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending` or `Approved`: create the next `IssuanceBatch{Requested}` (§3.12) |
+| `quote_listing(valuation, listing_fee_bps, expires_at)` | listing_authority | non-`Currency` listing `Pending` or `Quoted`: store the listing-fee quote, status `Quoted` (§3.13) |
+| `pay_listing_fee` | `listing.issuer` | listing `Quoted`, quote not expired: pay the quoted fee into the fee vault; status `Approved` (§3.13). The only way an issuer listing is first approved |
+| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending`, `Quoted` or `Approved`: create the next `IssuanceBatch{Requested}` (§3.12) |
 | `approve_issuance` / `reject_issuance` | listing_authority | approve: listing `Approved`, mint the batch to the recipient via the PDA, emit `IssuanceExecuted`; reject: close the request without minting (§3.12) |
 | `burn_with_reason(amount, reason, reference)` | holder | burn own tokens of an issuer-listed asset with reason `Redemption`/`Cancellation`, emit `TokensBurned` (§3.12) |
 | `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false`. Creates no fee vault: only the fee mint has one (`init_fee_vault`) |
-| `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event |
+| `approve_listing` / `suspend_listing` / `delist` | listing_authority | change status, emit event. `approve_listing` only reinstates (`Suspended` → `Approved`, any class, free) and refuses a `Pending` or `Quoted` listing (`ListingFeeNotPaid`, §3.13). `delist` from `Pending` or `Quoted` is how a listing is rejected |
 | `freeze_cashback` / `unfreeze_cashback` | listing_authority | set / clear `listing.cashback_frozen` (§9.5). No timelock, any listing status, allowed while paused; fails on a `Currency` listing (`NotCashbackEligible`) and when the flag would not change (`CashbackAlreadyFrozen` / `CashbackNotFrozen`). Emits `CashbackFreezeSet { listing, asset_mint, frozen, listing_authority }` |
 | `init_cashback_ledger` | anyone (payer) | create the `CashbackLedger` for (listing, `Config.fee_mint`) before the listing's first settlement or deal |
 | `settle(match_id: [u8;16], asset_amount, payment_amount)` | settlement_operator | order-book mode: atomic swap via delegates; `payment_mint == Config.fee_mint`; `match_id` not all zeros (see 3.4) |
@@ -166,8 +171,8 @@ interface SettlementAdapter {
 | `cancel_deal` | `deal.proposer` (while `Open`) | refund deposit, close vault. Emits `DealCancelled` |
 | `expire_deal` | anyone, once `now ≥ expires_at` | refund deposit to an account of the proposer, close vault (permissionless crank). Emits `DealExpired` |
 | `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault; reverts while `listing.cashback_frozen` (`CashbackFrozen`) |
-| `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
-| `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
+| `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued + listing_fees_collected − protocol_withdrawn` of the `FeeLedger`: the trading fees' protocol share plus every listing fee); can never touch issuers' cashback |
+| `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected + listing_fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
 | `propose_change` / `execute_change` / `cancel_change` | admin | timelocked fee/cashback/operator/listing-authority/treasury/fee-mint changes (fee-mint switch: §3.4); the outgoing roles do not sign, so the admin alone can rotate a leaked key. An `Admin` change is proposed and cancelled here, but `execute_change` refuses it (`AdminChangeNeedsAcceptance`) |
 | `accept_admin` | the proposed admin | second step of an admin transfer: once the timelock of a pending `ConfigChange::Admin(new_admin)` has elapsed, `new_admin` signs and becomes `Config.admin` (`NotPendingAdmin` for any other signer). Proves the new key can sign, so a typo cannot lose the admin. The new admin only signs (pays nothing, is not written), so a Squads v4 vault can accept through a vault transaction. The pending account's rent goes back to the outgoing admin. Emits `ChangeExecuted` |
 | `pause` / `unpause` | admin | circuit breaker (see below) |
@@ -176,14 +181,17 @@ interface SettlementAdapter {
 own accounting, but never stops a user from taking back their own escrowed
 deposit. While `paused`:
 - **blocked:** `settle`, `open_deal`, `accept_deal`, `withdraw_cashback`,
-  `withdraw_protocol_fees`, `sweep_excess`, `approve_issuance`. If the
+  `withdraw_protocol_fees`, `sweep_excess`, `approve_issuance`,
+  `pay_listing_fee`. If the
   incident is an accounting bug (e.g. over-credited cashback), withdrawals are
   exactly the drain path; minting is the highest-impact action there is.
+  `pay_listing_fee` writes to the same fee ledger and vault, and it would
+  make a new listing tradable in the middle of an incident.
 - **always allowed:** `cancel_deal` and `expire_deal` (a user reclaims their own
   deposit, which the protocol's accounting does not decide), `burn_with_reason`
   (a holder destroys its own tokens), listing actions (`submit_listing`,
-  `list_currency`, `approve_listing`, `suspend_listing`, `delist`,
-  `freeze_cashback`, `unfreeze_cashback`),
+  `quote_listing`, `list_currency`, `approve_listing`, `suspend_listing`,
+  `delist`, `freeze_cashback`, `unfreeze_cashback`),
   `request_issuance` and `reject_issuance` (neither mints),
   `init_cashback_ledger`, `init_fee_vault`, and admin/timelock actions
   (including `accept_admin`).
@@ -222,6 +230,8 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
 - **One fee vault, one fee ledger** (`["fee_vault", fee_mint]`,
   `["fees", fee_mint]`), created by `init_fee_vault`; cashback ledgers are
   `["cashback", listing, fee_mint]`. Other currencies get no fee vault.
+  Listing fees (§3.13) go into the same vault and ledger, in their own
+  counter (`listing_fees_collected`).
 - **Fee-mint switch** (`ConfigChange::FeeMint`, timelocked like any config
   change). The seeds keep the mint, so a switch never mixes two currencies in
   one account: after `execute_change`, `init_fee_vault` creates the new mint's
@@ -230,7 +240,9 @@ fee, and therefore all cashback, is charged in it, in both trading modes:
   through the old ledgers (withdrawals and `sweep_excess` are keyed by mint,
   not by `Config.fee_mint`). Deals still open whose USDT leg is the old mint
   can no longer be accepted (`NotFeeMint`); they are cancelled or expire as
-  usual. It is a migration tool (e.g. a redeployed test USDT), not something
+  usual. Likewise an open listing-fee quote is in the old mint's units and
+  can no longer be paid (`NotFeeMint`); the listing authority re-quotes
+  (§3.13). It is a migration tool (e.g. a redeployed test USDT), not something
   routine.
 - Multi-currency payment with fee conversion (e.g. charging the fee of a
   BRL ↔ EUR deal in USDT) needs a price oracle and is out of v1 (§3.10).
@@ -467,7 +479,8 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   every rejected mint fails with `UnsupportedMintExtension` on every path. Token-2022 cannot add the rejected
   extensions to a mint after initialization, so the check holds for the life of
   the listing; `settle`, `open_deal` and `accept_deal` still re-run it on both
-  the asset and the payment mint as defense in depth.
+  the asset and the payment mint as defense in depth, and `pay_listing_fee`
+  on the fee mint.
 - **Freeze authority.** The extension allowlist does not cover the base mint's
   `freeze_authority`. Asset mints (`submit_listing`) must have
   `freeze_authority == None`, otherwise the issuer could freeze escrow vaults,
@@ -556,12 +569,14 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):
   1. `payment_amount == seller_receives + fee` for every settlement
-  2. `Σ cashback accrued ≤ Σ fees collected` per fee mint
+  2. `Σ cashback accrued ≤ Σ trading fees collected` per fee mint
      (`FeeLedger.cashback_accrued ≤ FeeLedger.fees_collected`, and
-     `FeeLedger.cashback_accrued == Σ CashbackLedger.accrued` for that mint)
+     `FeeLedger.cashback_accrued == Σ CashbackLedger.accrued` for that mint).
+     Listing fees never accrue cashback, so they are not on the right-hand side
   3. no settlement on a listing whose status ≠ `Approved`
-  4. vault balance == unwithdrawn protocol fees + unwithdrawn cashback
-     (`fees_collected − protocol_withdrawn − cashback_withdrawn`). Anyone can
+  4. vault balance == unwithdrawn trading fees + listing fees + cashback
+     (`fees_collected + listing_fees_collected − protocol_withdrawn −
+     cashback_withdrawn`). Anyone can
      transfer into a fee vault, so between sweeps this is `≥`; donations are
      not accounted and cannot be withdrawn as fees or cashback.
      `sweep_excess` moves them to the treasury, and **after a sweep it is
@@ -586,7 +601,15 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   12. fees are only ever charged in `Config.fee_mint` (USDT): no `FeeLedger`
       or fee vault exists for any other mint, every executed trade has one
       leg in the fee mint, and the party receiving that leg gets
-      `amount − fee` while the other party receives its leg in full
+      `amount − fee` while the other party receives its leg in full. Listing
+      fees too: `pay_listing_fee` only takes the fee mint
+  13. listing fee (§3.13): `listing_fee_paid` is 0 until `pay_listing_fee`
+      and then equals
+      `listing_fee == ceil(valuation × listing_fee_bps / 10_000)`, with
+      `1 ≤ listing_fee_bps ≤ MAX_LISTING_FEE_BPS`; every non-`Currency`
+      listing that is `Approved` or `Suspended` has paid; no listing pays
+      twice; and per fee mint,
+      `Σ listing_fee_paid == FeeLedger.listing_fees_collected`
 
 ### 3.10 Out of v1 scope (state it, don't fake it)
 
@@ -647,8 +670,9 @@ program's `OwnerMismatch`, and no instruction of the program ever moves the
 authority again. Consequences, stated rather than hidden:
 - The issuer must finish any mint setup that needs the mint authority (e.g.
   initializing `TokenMetadata`) before submitting.
-- The hand-over is permanent. A listing rejected while `Pending` (delisted)
-  leaves an empty mint nobody can use; the issuer creates a new mint. A
+- The hand-over is permanent. A listing rejected while `Pending` or
+  `Quoted` (delisted) leaves an empty mint nobody can use; the issuer
+  creates a new mint. A
   delisted asset keeps its supply (holders can still burn) but never grows.
 - Freeze authority is already `None` for asset mints (§3.8), so the mint
   authority is the only authority left on the mint.
@@ -658,7 +682,7 @@ authority again. Consequences, stated rather than hidden:
 
 | Instruction | Signer | Effect |
 |---|---|---|
-| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending` or `Approved`; `amount > 0`, non-empty `doc_hash`, `recipient` not the default key. Creates batch `listing.next_batch_no` (`Requested`) and increments the counter. Mints nothing. Emits `IssuanceRequested` |
+| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending`, `Quoted` or `Approved`; `amount > 0`, non-empty `doc_hash`, `recipient` not the default key. Creates batch `listing.next_batch_no` (`Requested`) and increments the counter. Mints nothing. Emits `IssuanceRequested` |
 | `approve_issuance` | `listing_authority` | batch `Requested` and listing `Approved`; blocked while paused. Mints `amount` to a token account of the asset mint owned by `recipient` (`mint_to_checked`, signed by the mint-authority PDA); `listing.issued += amount`; batch `Executed`. Emits `IssuanceExecuted { asset_mint, batch_no, amount, recipient, doc_hash, destination }` |
 | `reject_issuance` | `listing_authority` | batch `Requested` → `Rejected`; mints nothing. Any listing status, not blocked by pause. Emits `IssuanceRejected` |
 | `burn_with_reason(amount, reason, reference)` | holder (token account owner) | non-`Currency` listing, any status; `amount > 0`, non-empty `reference`; `burn_checked` from the holder's account; `listing.burned += amount`. `reason`: `Redemption` \| `Cancellation`. Emits `TokensBurned { asset_mint, holder, holder_account, amount, reason, reference }` |
@@ -670,10 +694,11 @@ authority again. Consequences, stated rather than hidden:
 - `doc_hash` is the hash of the document that authorizes the batch (e.g. the
   corporate act approving a capital increase or a debenture series), registered
   in Niara-Register; `reference` plays the same role for a burn.
-- Batches may be requested while the listing is `Pending` (the initial
-  offering can be prepared before approval) but execute only once it is
-  `Approved`. A `Suspended` listing keeps its requests; they execute after
-  reinstatement or are rejected.
+- Batches may be requested while the listing is `Pending` or `Quoted` (the
+  initial offering can be prepared before approval) but execute only once it
+  is `Approved`, i.e. once the listing fee is paid (§3.13). A `Suspended`
+  listing keeps its requests; they execute after reinstatement or are
+  rejected. Batches charge no listing fee.
 - Pause: `approve_issuance` is blocked (minting is the highest-impact action
   there is); `request_issuance`, `reject_issuance` and `burn_with_reason` are
   allowed (none pays out on the protocol's accounting; a burn only destroys
@@ -699,6 +724,73 @@ test shows the gap a direct burn opens).
 **Test fixtures.** Trading tests write token balances directly into accounts
 (no mint), so their asset mints have balances without supply. Invariant 11 is
 checked only on assets issued through batches.
+
+### 3.13 On-chain listing fee
+
+Decision (2026-11-13): the listing fee (§1) is charged on-chain, and paying
+it is what approves an issuer listing. It replaces the off-chain charge that
+the Register used to record.
+
+**Flow.** `submit_listing` (issuer; `Pending`, unchanged) → `quote_listing`
+(listing authority; `Quoted`) → `pay_listing_fee` (issuer; `Approved`).
+`Currency` listings keep their path: `list_currency` creates them `Approved`,
+and they pay no listing fee.
+
+| Instruction | Signer | Effect |
+|---|---|---|
+| `quote_listing(valuation, listing_fee_bps, expires_at)` | listing_authority | non-`Currency` listing (`CurrencyHasNoListingFee`) in status `Pending` or `Quoted` (`InvalidStatusTransition`); `valuation > 0`, in base units of the fee mint (`ZeroValuation`); `1 ≤ listing_fee_bps ≤ MAX_LISTING_FEE_BPS = 100` (`InvalidListingFeeBps`); `now < expires_at ≤ now + 30 days` (`InvalidExpiry`, `MAX_QUOTE_DURATION_SECS`). Stores `valuation`, `listing_fee_bps`, `listing_fee = ceil(valuation × listing_fee_bps / 10_000)`, `listing_fee_mint = Config.fee_mint` and `quote_expires_at = expires_at`; status `Quoted`. Allowed while paused (a listing action, §3.3). Emits `ListingQuoted { listing, asset_mint, fee_mint, valuation, listing_fee_bps, listing_fee, expires_at }` |
+| `pay_listing_fee` | `listing.issuer` | blocked while paused (`Paused`); status `Quoted` (`ListingNotQuoted`) and `now < quote_expires_at` (`QuoteExpired`); the fee mint passed must be `Config.fee_mint` and the quote's `listing_fee_mint` (`NotFeeMint`); the mint allowlist is re-run on it. Transfers `listing_fee` of the fee mint from a token account owned by the issuer into the fee vault (`transfer_checked`, signed by the issuer), adds it to `FeeLedger.listing_fees_collected`, sets `listing_fee_paid = listing_fee`, status `Approved` and `approved_at = now`. Emits `ListingFeePaid { listing, asset_mint, issuer, fee_mint, valuation, listing_fee_bps, amount }`, then `ListingApproved` (§4.1) |
+
+Rules:
+- **The only path to a first approval.** `approve_listing` refuses a
+  `Pending` or `Quoted` listing (`ListingFeeNotPaid`). It still reinstates a
+  `Suspended` listing of any class, and reinstating charges nothing: a
+  suspended issuer listing has already paid. `Pending → Approved` is no
+  longer a valid transition. A listing is rejected with `delist`, from
+  `Pending` or `Quoted`; `suspend_listing` stays `Approved`-only.
+- **Re-quoting** is allowed until the fee is paid: `quote_listing` on a
+  `Quoted` listing replaces every quote field, also after the quote expired.
+- **Once per listing, not per batch.** After payment the status never
+  returns to `Quoted`, so a second payment fails (`ListingNotQuoted`) and so
+  does a new quote (`InvalidStatusTransition`). Issuance batches (§3.12) and
+  reinstatements charge nothing.
+- **Cap, not floor.** On-chain only the cap is enforced
+  (`listing_fee_bps ≤ 100`, 1%), plus `listing_fee_bps ≥ 1` so a quote is
+  never free. The 0.1% floor is pricing policy, as for the trading fee (§1).
+  Raising the cap takes a program upgrade.
+- **Rounding up.** `listing_fee = ceil(valuation × listing_fee_bps / 10_000)`
+  (checked, `u128` intermediate), so with `valuation ≥ 1` and
+  `listing_fee_bps ≥ 1` the fee is at least 1 base unit and at most
+  `valuation / 100` rounded up.
+- **Accounting.** The listing fee is protocol revenue with no cashback
+  share: it goes to `FeeLedger.listing_fees_collected` and never touches
+  `fees_collected`, `cashback_accrued` or any `CashbackLedger`.
+  `withdraw_protocol_fees` can withdraw it; `sweep_excess` counts it as owed.
+- **Fee mint.** The valuation and the fee are in base units of the fee mint
+  in force at `quote_listing`, recorded as `listing_fee_mint`. After a
+  timelocked fee-mint switch (§3.4) that quote can no longer be paid
+  (`NotFeeMint`); the listing authority re-quotes in the new mint.
+- **Pause.** `quote_listing` is allowed (a listing action, moves nothing);
+  `pay_listing_fee` is blocked (§3.3).
+- **Trust.** The listing authority sets the valuation and the rate; the
+  program checks only the bounds and the expiry. The issuer sees the quote
+  in the `Listing` account and in `ListingQuoted` before it signs
+  `pay_listing_fee`, so paying is the issuer's acceptance; an issuer that
+  disagrees does not pay, and the listing stays unapproved.
+- **The valuation is public.** It is stored in the `Listing` account and
+  carried by `ListingQuoted` and `ListingFeePaid`, so anyone can read it, and
+  the account history and events keep it after a re-quote. Issuers must be
+  told before they are quoted; a valuation that must stay confidential
+  cannot go through this path.
+- **Layout.** `Listing` gains the six quote fields and `FeeLedger` gains
+  `listing_fees_collected`, both before deployment of any account of either
+  type: on 2026-11-13 the devnet program is deployed but no setup has run,
+  so the upgrade needs no migration.
+
+**Invariant 13** (§3.9): every non-`Currency` listing that is `Approved` or
+`Suspended` paid exactly `ceil(valuation × listing_fee_bps / 10_000)`, once,
+with `listing_fee_bps ≤ MAX_LISTING_FEE_BPS`, and the fee ledger's
+`listing_fees_collected` is the sum of what was paid in its mint.
 
 ---
 
@@ -742,7 +834,8 @@ zero `doc_hash` and no issuer (`Pubkey::default()` / `address(0)`).
 | Listing path | Solana instruction → event | EVM (`ListingRegistry`) function → event |
 |---|---|---|
 | Issuer submits (`Pending`) | `submit_listing` → `ListingSubmitted { listing, asset_mint, issuer, asset_class, doc_hash }` | `submitListing` → `ListingSubmitted(token, issuer, assetClass, docHash)` |
-| Niara approves an issuer listing (`Pending` → `Approved`) | `approve_listing` → `ListingApproved` | `approveListing` → `ListingApproved` |
+| Niara quotes the listing fee (`Pending`/`Quoted` → `Quoted`) | `quote_listing` → `ListingQuoted { listing, asset_mint, fee_mint, valuation, listing_fee_bps, listing_fee, expires_at }` | no counterpart yet (see the note under §4.2) |
+| An issuer listing is approved (Solana: `Quoted` → `Approved`; EVM: `Pending` → `Approved`) | `pay_listing_fee` (signed by the issuer) → `ListingFeePaid { listing, asset_mint, issuer, fee_mint, valuation, listing_fee_bps, amount }`, then `ListingApproved` | `approveListing` → `ListingApproved` |
 | Niara lists a currency (created `Approved`) | `list_currency` → `ListingApproved` | `listCurrency` → `ListingApproved` |
 | Reinstatement (`Suspended` → `Approved`, any class) | `approve_listing` → `ListingApproved` (new `approved_at`) | `approveListing` → `ListingApproved` (new `approvedAt`) |
 | Suspension (`Approved` → `Suspended`) | `suspend_listing` → `ListingSuspended { listing, asset_mint }` | `suspendListing` → `ListingSuspended(token)` |
@@ -757,7 +850,9 @@ account, so `token` plays the role of both `listing` and `asset_mint`).
 ### 4.2 EVM vs Solana differences (intentional)
 
 Aligned on both chains:
-- asset classes, listing status table, `ListingApproved` on both listing paths (§4.1);
+- asset classes, listing status table (except `Quoted`, Solana only until the
+  EVM listing fee lands, see the note after the table below), `ListingApproved`
+  on both listing paths (§4.1);
 - issuance batches numbered from 1 with `requested_at`/`resolved_at`, `reject_issuance`
   in any listing status, `approve_issuance` blocked while paused, non-zero `doc_hash` /
   burn `reference`;
@@ -825,6 +920,16 @@ What still differs, on purpose:
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 
+**Not yet aligned: the listing fee.** On Solana the listing fee is charged
+on-chain and paying it approves an issuer listing (`quote_listing`, then
+`pay_listing_fee`, §3.13); `approve_listing` only reinstates. The EVM
+`ListingRegistry` has no quote or payment step yet: `approveListing`
+approves a `Pending` listing directly, and the listing fee is still charged
+off-chain there. This is not an intentional difference; bringing the same
+flow to `ListingRegistry` (quote with the 1% cap and a 30-day expiry, payment
+in `feeToken` into the protocol's revenue with no cashback share, and
+`approveListing` limited to reinstatement) is an EVM work item.
+
 ---
 
 ## 5. Off-chain (Supabase `niara-exchange-dev`)
@@ -849,11 +954,13 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
 - Wallets: wagmi v3 (EVM) + Solana Wallet Standard (Phantom, Solflare, Backpack).
 - New real flow (separate from the simulated `/trade`):
   create mint → submit listing (mint authority moves to the program) → (admin)
-  approve listing → issuer requests an issuance batch → (admin) approve batch →
+  quote the listing fee → issuer pays it (the listing is approved) → issuer
+  requests an issuance batch → (admin) approve batch →
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
 - Deploy on **Vercel**.
 - **Niara-Register:** extend the indexer to capture `ListingApproved`
-  (both listing paths, §4.1), `Settled`, `DealExecuted` (Solana program and
+  (both listing paths, §4.1), `ListingFeePaid` (Solana), `Settled`,
+  `DealExecuted` (Solana program and
   EVM `P2PEscrow`), `IssuanceExecuted` and `TokensBurned`
   on all three chains into the "Global registry" area (today empty
   because the Exchange has not operated for real). On EVM, `TokensBurned` is

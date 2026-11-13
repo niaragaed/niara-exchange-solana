@@ -2,10 +2,11 @@
 // TESTNET ONLY: test tokens, no real assets, no real money.
 //
 // Three flows; every transaction prints its explorer link:
-//   a  Equity, order-book mode: create mint -> submit_listing -> approve_listing
-//      -> issuance batch -> delegate -> settle -> withdraw_cashback
-//   b  FixedIncome, P2P escrow: (mint, listing and batch as in a) -> open_deal
-//      (the holder sells debentures for MockUSDT) -> accept_deal
+//   a  Equity, order-book mode: create mint -> submit_listing -> quote_listing
+//      -> pay_listing_fee (approves the listing) -> issuance batch -> delegate
+//      -> settle -> withdraw_cashback
+//   b  FixedIncome, P2P escrow: (mint, listing, listing fee and batch as in a)
+//      -> open_deal (the holder sells debentures for MockUSDT) -> accept_deal
 //   c  Currency, P2P escrow: MockBRL <-> MockUSDT, open_deal (the proposer buys
 //      MockBRL and escrows MockUSDT) -> accept_deal
 //
@@ -56,6 +57,15 @@ const MOCK_UNIT = 10n ** BigInt(MOCK_DECIMALS);
 /** Securities are whole units (shares, debentures). */
 const ASSET_DECIMALS = 0;
 const MIN_FUNDER_LAMPORTS = 0.2 * LAMPORTS_PER_SOL;
+/**
+ * Listing-fee quote of every demo listing (spec §3.13): a 1,000,000 mockUSDT
+ * test valuation at 0.1% (the pricing floor; the program caps it at 1%), so
+ * the issuer pays 1,000 mockUSDT. The valuation is public on-chain.
+ */
+const DEMO_VALUATION = 1_000_000n * MOCK_UNIT;
+const DEMO_LISTING_FEE_BPS = 10;
+/** The quote stays payable for an hour (the program allows up to 30 days). */
+const QUOTE_TTL_SECS = 3_600;
 
 const { values: args } = parseArgs({
   options: { cluster: { type: "string" }, flow: { type: "string", default: "all" } },
@@ -95,6 +105,11 @@ function feeSplit(usdtAmount: bigint, feeBps: number, cashbackBps: number, cashb
   return { fee, cashback };
 }
 
+/** Same math as the program (spec §3.13): the listing fee rounds up. */
+function listingFeeOf(valuation: bigint, listingFeeBps: number): bigint {
+  return (valuation * BigInt(listingFeeBps) + 9_999n) / 10_000n;
+}
+
 /** The mock-token mint authority (Niara) mints test currency to a party. */
 function mintMockIx(demo: Demo, mint: PublicKey, owner: PublicKey, amount: bigint): TransactionInstruction {
   return createMintToCheckedInstruction(
@@ -110,9 +125,10 @@ function mintMockIx(demo: Demo, mint: PublicKey, owner: PublicKey, amount: bigin
 
 /**
  * Native issuance (spec §3.12): the issuer creates the mint and submits the
- * listing (the mint authority moves to the program), Niara approves the
- * listing, the issuer requests batch #1 and Niara approves it, which mints to
- * the holder. Ends with the listing's cashback ledger. Returns the mint.
+ * listing (the mint authority moves to the program), Niara quotes the listing
+ * fee and the issuer pays it, which approves the listing (spec §3.13), the
+ * issuer requests batch #1 and Niara approves it, which mints to the holder.
+ * Ends with the listing's cashback ledger. Returns the mint.
  */
 async function issueAsset(
   demo: Demo,
@@ -165,16 +181,57 @@ async function issueAsset(
     issuer,
   );
 
+  // Listing fee (spec §3.13): Niara quotes it, the issuer pays it in
+  // mockUSDT, and paying is what approves the listing. approve_listing would
+  // refuse this listing (ListingFeeNotPaid): it only reinstates.
+  const listingFee = listingFeeOf(DEMO_VALUATION, DEMO_LISTING_FEE_BPS);
+  const expiresAt = (await clusterTime(ctx)) + QUOTE_TTL_SECS;
   await step(
-    "approve_listing (Niara listing authority)",
+    `quote_listing (Niara listing authority): valuation ${usdt(DEMO_VALUATION)} at ${DEMO_LISTING_FEE_BPS} bps ` +
+      `= ${usdt(listingFee)}, payable for ${QUOTE_TTL_SECS / 60} min`,
     [
       await program.methods
-        .approveListing()
+        .quoteListing(bn(DEMO_VALUATION), DEMO_LISTING_FEE_BPS, bn(expiresAt))
         .accountsPartial({ listingAuthority: demo.listingAuthority.publicKey, config: pda.config(), listing })
         .instruction(),
     ],
     demo.listingAuthority,
   );
+  const quoted = await eventually(() => program.account.listing.fetch(listing), (value) => "quoted" in value.status);
+  if (!("quoted" in quoted.status)) throw new Error("check failed: the listing is not Quoted");
+  await expectEqual("quoted listing fee", async () => BigInt(quoted.listingFee.toString()), listingFee);
+
+  const source = ata(demo.usdt, issuer.publicKey);
+  await step(
+    `Niara mints ${usdt(listingFee)} (test currency) to the issuer for the listing fee`,
+    [createAtaIx(issuer.publicKey, demo.usdt, issuer.publicKey), mintMockIx(demo, demo.usdt, issuer.publicKey, listingFee)],
+    issuer,
+    demo.mockAuthority,
+  );
+  await step(
+    `pay_listing_fee (issuer): ${usdt(listingFee)} into the fee vault; the listing is approved`,
+    [
+      await program.methods
+        .payListingFee()
+        .accountsPartial({
+          issuer: issuer.publicKey,
+          config: pda.config(),
+          listing,
+          feeMint: demo.usdt,
+          feeLedger: pda.feeLedger(demo.usdt),
+          feeVault: pda.feeVault(demo.usdt),
+          source,
+          tokenProgram: TOKEN_PROGRAM,
+        })
+        .instruction(),
+    ],
+    issuer,
+  );
+  const approved = await eventually(() => program.account.listing.fetch(listing), (value) => "approved" in value.status);
+  if (!("approved" in approved.status)) throw new Error("check failed: the listing is not Approved");
+  console.log("  ok: listing Approved");
+  await expectEqual("listing fee paid (on the listing)", async () => BigInt(approved.listingFeePaid.toString()), listingFee);
+  await expectEqual("issuer's mockUSDT after paying", () => tokenBalance(ctx, source), 0n);
 
   const batchNo = (await eventually(() => program.account.listing.fetch(listing), () => true)).nextBatchNo;
   const batch = pda.batch(listing, batchNo);

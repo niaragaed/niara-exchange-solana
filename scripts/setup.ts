@@ -8,7 +8,11 @@
 //   3. initialize_config (fee_mint = MockUSDT, timelock 60 s), signed by the
 //      deployer, which must be the program's upgrade authority;
 //   4. init_fee_vault;
-//   5. list_currency for MockUSDT and MockBRL.
+//   5. list_currency for MockUSDT and MockBRL (currencies pay no listing fee).
+//
+// Setup creates no issuer listing. Those are created by scripts/demo.ts, and
+// each one is approved only by paying its listing fee (quote_listing, then
+// pay_listing_fee; spec §3.13).
 //
 // Safe to run again: every step is skipped when its account already exists.
 //

@@ -320,17 +320,21 @@ node scripts/demo.ts --cluster devnet --flow a   # one of a, b, c
 
 | Flow | What it shows |
 |---|---|
-| a | `Equity`, order-book mode: create mint → `submit_listing` → `approve_listing` → issuance batch (`request_issuance`, `approve_issuance`) → delegate → `settle` → `withdraw_cashback` |
-| b | `FixedIncome`, P2P escrow: mint, listing and batch as in (a), then `open_deal` (the holder sells debentures for MockUSDT) → `accept_deal` |
+| a | `Equity`, order-book mode: create mint → `submit_listing` → `quote_listing` (listing authority) → Niara mints the fee in MockUSDT to the issuer → `pay_listing_fee` (issuer; approves the listing) → issuance batch (`request_issuance`, `approve_issuance`) → delegate → `settle` → `withdraw_cashback` |
+| b | `FixedIncome`, P2P escrow: mint, listing, listing fee and batch as in (a), then `open_deal` (the holder sells debentures for MockUSDT) → `accept_deal` |
+
+Each demo listing is quoted at a 1,000,000 MockUSDT test valuation and 0.1%
+(10 bps), so the issuer pays 1,000 MockUSDT into the fee vault. The
+valuation is public on-chain (spec §3.13).
 | c | `Currency`, P2P escrow, MockBRL ↔ MockUSDT: `open_deal` (the proposer buys MockBRL and escrows MockUSDT) → `accept_deal` |
 
 Every issuer, seller and buyer is a new keypair created by the run and saved
 in `~/.config/niara-exchange/devnet/demo-runs/<time>/`. They are funded by the
 demo funder and return their unused SOL at the end. Every transaction prints
 its explorer link, and the script checks the resulting balances, fee and
-cashback and stops at the first mismatch. A full run is about 40 transactions
-and cost the funder 0.049 SOL on the local validator (rent of the accounts it
-leaves behind, plus fees). Refill the funder by running setup again or with:
+cashback and stops at the first mismatch. A full run is about 46 transactions
+and cost the funder 0.052 SOL on the local validator (rent of the accounts it
+leaves behind, plus fees; measured 2026-11-13 with the listing fee). Refill the funder by running setup again or with:
 
 ```bash
 solana transfer <DEMO_FUNDER_ADDRESS> 0.5 --from "$DEPLOYER" --keypair "$DEPLOYER" --url devnet
@@ -360,7 +364,21 @@ history if it carries an API key.
 
 An upgrade replaces the code, not the accounts. A change to the layout of
 `Config`, `Listing`, `Deal` or any other existing account needs a migration
-(or a new program ID and a new setup); plan it before deploying. Error codes
+(or a new program ID and a new setup); plan it before deploying.
+
+**Pending upgrade: on-chain listing fee (spec §3.13).** Not deployed. It
+changes the `Listing` and `FeeLedger` layouts; no account of either type
+exists on devnet (setup has not run), so no migration is needed as long as
+the upgrade lands before the first setup. Cost, read from devnet on
+2026-11-13 (`solana rent`, `program show`):
+
+| Item | Value |
+|---|---|
+| Binary | 759 728 bytes (+29 048 over the deployed 730 680), sha256 `490898e903cea99dfa4a1335d38540289c9b02956b286312f1b6a062651f11f4` |
+| Program extend (permanent) | 3.86029708 − 3.71273324 = **0.14756 SOL** |
+| Buffer rent (returned when the upgrade lands) | **3.86026 SOL** |
+| Write transactions | about 751, about 0.004 SOL in fees |
+| Free balance needed at the peak | about 4.02 SOL (the deployer held 8.28) | Error codes
 only ever grow at the end (CLAUDE.md).
 
 ## 11. Rehearse locally

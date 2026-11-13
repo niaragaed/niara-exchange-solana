@@ -91,9 +91,13 @@ whole WSL session killed by the OOM killer (exit 137).
   file names; still review `git status` before every commit.
 - **No devnet (or any network) deploy** and no `git push` without an explicit
   request in the current conversation.
-- **Never use `git checkout`, `git restore` or `git reset` on uncommitted
-  work**: they discard it with no way back. Commit it or `git stash` it
-  first.
+- **Never use `git reset`, in any form**: no `--hard`, `--soft`, `--mixed`,
+  `--keep` or `--merge`, no bare `git reset` and no `git reset <path>`. The
+  only way to unstage is `git restore --staged <path>`, which leaves the
+  working tree alone.
+- **Never use `git checkout` or `git restore` to discard uncommitted work**
+  (`git checkout -- <path>`, `git restore <path>`, `git restore --worktree`):
+  it is gone with no way back. Commit it or `git stash` it first.
 - **Every instruction needs tests**: the success path, every authorization
   check, every `require!`/constraint failure, and its pause behavior. New
   accounting must also be covered by the invariant fuzzer

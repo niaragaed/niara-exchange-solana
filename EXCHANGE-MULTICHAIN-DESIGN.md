@@ -808,6 +808,7 @@ What still differs, on purpose:
 | Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
 | Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
 | Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together; `cancel_deal`/`expire_deal` never read it | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle`, both `CashbackDistributor` withdrawals and `P2PEscrow.openDeal`/`acceptDeal`/`sweepExcess` read it (`ProtocolPausable`, `EnforcedPause()`); those contracts have no pause of their own, and `cancelDeal`/`expireDeal` never read it. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
+| Admin transfer | Two steps (§3.3): the admin calls `propose_change(Admin)`, then, once the timelock has elapsed, the new admin signs `accept_admin`; until then the outgoing admin can `cancel_change` | A timelocked grant of the roles to the Safe, then a revocation of the old key's roles that the Safe proposes and executes. That Safe-signed revocation is the acceptance; until it executes, the old key can cancel it (§9.6, tested in `test/MultisigHandover.t.sol`) | Solana has one `Config.admin` field, so the new key must accept before it replaces the old one. `AccessControl` lets both keys hold a role at once, so the old key is removed by a transaction the Safe signs. Either way the new key proves it can sign before the old one loses control |
 | Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
 | Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
 | Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
@@ -1059,15 +1060,25 @@ listing does not stop it.
     with the two-step transfer, `propose_change(Admin)` then `accept_admin`
     signed by the vault (§3.3). Making the program immutable after audit
     (§3.6) is an option for the upgrade authority only, never for the admin.
-  - **EVM:** the admin, pause and treasury roles of the four contracts that
-    have roles go to a **Safe**: `DEFAULT_ADMIN_ROLE` on `ListingRegistry`,
-    `NiaraSettlement`, `CashbackDistributor` and `P2PEscrow`; `PAUSER_ROLE`
-    on `ListingRegistry` (the shared pause); `TREASURY_ROLE` on
-    `CashbackDistributor` and `P2PEscrow`. The v1 deploy script grants all
-    of them to the deployer. `AssetTokenFactory` has no roles.
+  - **EVM:** the admin, pause and treasury roles of the four v1 contracts
+    that have roles go to a **Safe**: `DEFAULT_ADMIN_ROLE` on
+    `ListingRegistry`, `NiaraSettlement`, `CashbackDistributor` and
+    `P2PEscrow`; `PAUSER_ROLE` on `ListingRegistry` (the shared pause);
+    `TREASURY_ROLE` on `CashbackDistributor` and `P2PEscrow`. The v1 deploy
+    script grants all of them to the deployer. `AssetTokenFactory` has no
+    roles. The backed-model `BackingGateway` and `AssetToken` (§1) have
+    roles too, but they are not part of v1.
   - **Rehearsed first on testnets**: Squads v4 on Solana devnet, Safe on
     Sepolia and Base Sepolia, including at least one full admin handover
-    signed by the multisig.
+    signed by the multisig. On Solana that signature is the vault's
+    `accept_admin`. The EVM handover has no on-chain acceptance step: the
+    deployer grants the roles to the Safe through the timelock, then the
+    Safe proposes and executes the revocation of the deployer's roles. That
+    Safe-signed revocation is the acceptance: like `accept_admin`, it
+    proves the new key can sign before the old one loses control. Until it
+    executes, the deployer still holds its roles and can cancel it (as the
+    outgoing Solana admin can `cancel_change` before `accept_admin`).
+    Tested in `niara-contracts` `test/MultisigHandover.t.sol`.
   - The settlement operator, the listing authority and the treasury are
     rotated by the admin through the timelock (§3.3), so a multisig admin
     can replace a leaked operational key without that key's cooperation.

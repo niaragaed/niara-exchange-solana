@@ -4,15 +4,32 @@
 regulatory authorization. The scripts refuse any cluster other than a local
 validator or devnet (they check the genesis hash).
 
-Status on 2026-11-12: **nothing has been deployed or sent to devnet yet.**
-Everything below was rehearsed against a local validator only: the setup and
-demo scripts (`bash scripts/localnet-demo.sh`, §11), and once by hand the CLI
-commands of §2 and §4 to §10 (first deploy with the program keypair, `show`,
-`dump`, upgrade by address, moving the upgrade authority and back, refilling
-the funder), with `--url http://127.0.0.1:8899` in place of `--url devnet`.
-The first real run is the first test on devnet itself (faucet, rate limits).
+Status on 2026-11-13: **the program is deployed on devnet** (record below).
+Setup and demo on devnet: not run yet. Before the deploy, everything was
+rehearsed against a local validator: the setup and demo scripts
+(`bash scripts/localnet-demo.sh`, §11), and once by hand the CLI commands of
+§2 and §4 to §10, with `--url http://127.0.0.1:8899` in place of
+`--url devnet`.
 
 Program ID: `B311xH3PcEx86gdRbuinrGrh1r9G2qzjDCji8uc6eD9v`
+
+## Devnet deployment record
+
+All links are Solana Explorer with `cluster=devnet`.
+
+### Program deploy (2026-11-13)
+
+| Item | Value |
+|---|---|
+| Program ID | [`B311xH3PcEx86gdRbuinrGrh1r9G2qzjDCji8uc6eD9v`](https://explorer.solana.com/address/B311xH3PcEx86gdRbuinrGrh1r9G2qzjDCji8uc6eD9v?cluster=devnet) |
+| ProgramData | [`8fVRp3gwLVrxE4peeyWQj3iBZw6Wccs3H16iCsEJPVWN`](https://explorer.solana.com/address/8fVRp3gwLVrxE4peeyWQj3iBZw6Wccs3H16iCsEJPVWN?cluster=devnet) |
+| Upgrade authority (dedicated deployer, not the Register's) | [`J8iiiosBVqFYy7WMryvV9eweaYM4Xat5SYZGmDynJARz`](https://explorer.solana.com/address/J8iiiosBVqFYy7WMryvV9eweaYM4Xat5SYZGmDynJARz?cluster=devnet) |
+| Deploy transaction | [`L28KvPeSZa9a2tW14Q4qTH1MGbZKuGeRTwzF95WHxnYLFxe8tmQugEkQT3B5uDQEtH16TRW7anWLzAoDBvrURWt`](https://explorer.solana.com/tx/L28KvPeSZa9a2tW14Q4qTH1MGbZKuGeRTwzF95WHxnYLFxe8tmQugEkQT3B5uDQEtH16TRW7anWLzAoDBvrURWt?cluster=devnet) |
+| Slot, time | 521888257, 2026-11-13 13:43:45 -03:00 |
+| Source | commit `c3e238d` (program sources as of `a834178`, two-step admin transfer) |
+| Binary | 730 680 bytes, sha256 `8bcf23a65173f066021691350fcca124f39e9d61fda532600effa1ec36e36fa7` |
+| Checks (§6) | `program show`: owner BPFLoaderUpgradeable, authority = deployer, data length 730 680; `program dump` matches the local `.so` byte for byte; no buffer left |
+| Cost | 3.7172 SOL from the deployer (12 → 8.2828): 3.7127 program data rent, the rest program account rent and fees |
 
 ## Conventions
 
@@ -134,11 +151,11 @@ Nothing in the repository airdrops. Approximate needs:
 
 | For | SOL |
 |---|---|
-| Program data rent: `(size of .so + 45 + 128) × 6 960` lamports; 4.998 SOL for today's 717 920-byte binary | ~5.0 |
+| Program data rent: `solana rent <size of .so + 45>`. Devnet charged 3.7127 SOL for the 730 680-byte binary (2026-11-13); the local validator charges more (4.998 SOL for 717 920 bytes) | ~3.7 |
 | Program account rent and deploy fees (about 720 write transactions) | < 0.01 |
 | `scripts/setup.ts`: 0.65 to the role keys (0.5 of it to the demo funder) plus rent | ~0.7 |
-| **First deploy + setup** | **~5.7; fund 6** |
-| Each upgrade: a second ~5 SOL for the buffer, returned when the upgrade lands; the fees stay spent | ~5 free |
+| **First deploy + setup** | **~4.4 on devnet; fund 5** |
+| Each upgrade: a second program-data rent for the buffer (~3.7 SOL on devnet), returned when the upgrade lands; the fees stay spent | ~3.7 free |
 
 Measured on the local validator: the first deploy took 5.0026 SOL from the
 deployer, an upgrade with the same binary 0.0036 SOL.

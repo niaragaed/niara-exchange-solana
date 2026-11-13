@@ -565,6 +565,21 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   pre-funded address, while paused), one ledger for every listing and both
   modes, and a timelocked fee-mint switch (old vault still withdrawable,
   old-mint deals refund-only, new trades in the new vault).
+- Listing fee (§3.13): `tests/test_listing_fee.rs` covers quote then pay
+  for each issuer class and both token programs (stored quote,
+  `ListingQuoted`, `ListingFeePaid` then `ListingApproved`, vault and
+  ledger), rounding up, the 1% cap and a zero rate, a zero valuation, the
+  expiry boundary of the quote (`now < expires_at ≤ now + 30 days`) and of
+  the payment (payable while `now < quote_expires_at`), re-quoting (also
+  after expiry), wrong signers on both instructions and a rotated listing
+  authority, `Currency` listings in every status, the source account
+  (owner, mint, balance) and the vault, any other mint and a fee-mint switch
+  that voids an open quote, pause (quote allowed, pay blocked), payment
+  without a quote, double payment, rejection by delisting, the
+  `approve_listing` bypass and free reinstatement, no trading while
+  `Quoted`, and the treasury withdrawing listing fees (never cashback). The
+  fixtures approve every issuer listing by quote and payment
+  (`approve_paid`), so every suite runs with listing fees in the fee vault.
 - Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):

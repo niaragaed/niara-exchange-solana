@@ -748,8 +748,9 @@ Aligned on both chains:
   pays the fee;
 - **fee rounding**: both chains round the fee **up**,
   `fee = ceil(usdt_amount × fee_bps / 10 000)`, so a non-zero rate never yields a zero
-  fee, and both reject a trade whose USDT receiver would get nothing (EVM is being
-  changed from `floor` to match);
+  fee, and both reject a trade whose USDT receiver would get nothing after it, under
+  the same error name: `ZeroSellerProceeds` on Solana (`settle`, `open_deal`),
+  `ZeroSellerProceeds()` on EVM (`settle`, `openDeal`);
 - **fee cap 0.5%** (business rule, §3.4): `fee_bps ≤ 50` on both chains. Solana:
   `MAX_FEE_BPS = 50`; the EVM cap must be set to the same value;
 - **P2P escrow** (§3.5; EVM `P2PEscrow`): the same asset classes
@@ -790,7 +791,7 @@ What still differs, on purpose:
 | Deal identity | One `Deal` account per deal, the PDA `["deal", proposer, deal_id]`; `accept_deal`, `cancel_deal` and `expire_deal` take that account | A storage entry keyed by `dealKey = keccak256(proposer, dealId)`; `acceptDeal(dealKey)` and the refund functions take the key | Solana addresses state by account, EVM by mapping key. Both scope the id to the proposer, so two proposers can use the same `deal_id` |
 | Tokens sent to the escrow | Every exit releases the deal vault's whole balance; the excess goes with the deposit and is reported as `vault_excess` (§3.5) | Every exit moves exactly the deposit; tokens sent to the contract stay there until the treasury takes them with `sweepExcess` | A Solana token account can only be closed empty and each deal has its own vault, so the excess must leave with the deposit. On EVM one contract holds every deposit: a stray transfer blocks nothing and belongs to no deal |
 | Deal fee accounting | `accept_deal` updates the `FeeLedger` and the `CashbackLedger` itself (same program as `settle`) | `P2PEscrow` calls `CashbackDistributor.recordDealFee`, which only `ESCROW_ROLE` may call | On EVM the escrow and the distributor are separate contracts, so the distributor must restrict who can record a fee |
-| Error names | `DealExpired` (accept from `expires_at` on); `ZeroSellerProceeds` (the USDT receiver would get nothing after the fee) | `DealHasExpired`; `AmountTooSmallForFeePrecision` | Names only, the conditions are the same. On Solana the error shares its name with the `DealExpired` event; the EVM error has its own |
+| Error names | `DealExpired` (accept from `expires_at` on) | `DealHasExpired` | Name only, the condition is the same. On Solana the error shares its name with the `DealExpired` event; the EVM error has its own. `ZeroSellerProceeds` has the same name on both chains (see the fee rounding item above) |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
 | Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; balances are kept per (asset, token) and per token, so only USDT ever accrues, and a fee-token switch leaves old balances withdrawable; no ledger accounts, no sweep | Pre-existing EVM distributor; `settle` alone enforces the fee token |
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |

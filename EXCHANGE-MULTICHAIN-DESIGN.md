@@ -1217,7 +1217,15 @@ listing does not stop it.
     proves the new key can sign before the old one loses control. Until it
     executes, the deployer still holds its roles and can cancel it (as the
     outgoing Solana admin can `cancel_change` before `accept_admin`).
-    Tested in `niara-contracts` `test/MultisigHandover.t.sol`.
+    The procedure is tested in `niara-contracts`
+    `test/MultisigHandover.t.sol`, on a deployment made by
+    `script/Deploy.s.sol`: all seven roles move, the old key keeps nothing,
+    the Safe can use every role and rotate the operator and the listing
+    authority, a grant to a wrong address never costs the deployer its
+    roles, every step waits for the timelock, and the deployer can
+    `cancelAction` a pending revocation. That test runs in Foundry against
+    `MockSafe`, a stand-in with no threshold, so it **does not replace** the
+    testnet rehearsal with a real Safe on Sepolia and Base Sepolia.
   - The settlement operator, the listing authority and the treasury are
     rotated by the admin through the timelock (§3.3), so a multisig admin
     can replace a leaked operational key without that key's cooperation.

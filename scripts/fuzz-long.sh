@@ -2,9 +2,10 @@
 # Long run of the invariant fuzzer: only tests/test_invariants.rs, with
 # PROPTEST_CASES=256 and one test thread (CLAUDE.md, Machine limits).
 #
-# All cargo output goes to ~/fuzz-256.log (overwritten on every run); the
+# All cargo output goes to ~/niara-logs/fuzz-256.log (overwritten on every
+# run; the folder is created if missing, CLAUDE.md keeps logs there). The
 # terminal only shows the start time, the end time and the result. Follow the
-# run from another terminal with:  tail -f ~/fuzz-256.log
+# run from another terminal with:  tail -f ~/niara-logs/fuzz-256.log
 #
 # This is a heavy process: run nothing else heavy (anchor build, npm install,
 # another cargo test, a local validator) while it is running. It runs through
@@ -21,7 +22,8 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 CASES=256
-LOG="$HOME/fuzz-256.log"
+LOG_DIR="$HOME/niara-logs"
+LOG="$LOG_DIR/fuzz-256.log"
 SO="target/deploy/niara_exchange.so"
 SRC="programs/niara_exchange"
 
@@ -34,6 +36,8 @@ if [[ -n "$stale" ]]; then
   echo "$SO is older than $stale: run 'bash scripts/build.sh' first" >&2
   exit 1
 fi
+
+mkdir -p "$LOG_DIR"
 
 # A closed terminal must not stop the run; the log file is the record.
 trap '' HUP

@@ -29,7 +29,7 @@ copies; it proposes spec edits in its reports.
 ```bash
 bash scripts/build.sh              # program binary, then IDL + types, with a fresh-artifact check
 bash scripts/mem-cap.sh cargo test --no-fail-fast -- --test-threads=1   # LiteSVM loads target/deploy/niara_exchange.so
-bash scripts/fuzz-long.sh          # 256-case invariant run, log in ~/fuzz-256.log
+bash scripts/fuzz-long.sh          # 256-case invariant run, log in ~/niara-logs/fuzz-256.log
 ```
 
 Always build with `scripts/build.sh` before `cargo test`: tests load the `.so`

@@ -80,6 +80,9 @@ whole WSL session killed by the OOM killer (exit 137).
   and it prints the peak. `scripts/build.sh` already uses it.
 - `cargo test` always with `--test-threads=1`
   (`cargo test ... -- --test-threads=1`).
+- **Keep test and run logs under `~/niara-logs/`, never in `/tmp`**
+  (`mkdir -p ~/niara-logs`, then redirect or `tee` into it). `/tmp` does not
+  survive a WSL restart: one erased the pre-deploy log on 2026-11-13.
 - cargo `jobs = 2` (set in `~/.cargo/config.toml`); do not raise it.
 - rust-analyzer is disabled on purpose; do not re-enable it.
 

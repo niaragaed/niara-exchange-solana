@@ -1282,23 +1282,46 @@ the product idea; it does not claim that Niara is, or is authorized as, a
 bank or a payment institution (§9.11). **Securities trading always settles
 in USDT**, and no service below changes that (see FX).
 
-**Services.**
-- **Digital cards settled on-chain** from the user's self-custody wallet.
-  Needs a card issuing partner (§9.11) and a spending model that leaves the
-  funds in the wallet until a purchase settles. Design to be done.
-- **Business solutions** for companies. Scope to be defined.
+**Founder's v1 definitions (2026-11-13).** The card, card receivables and
+payroll below are defined by the founder for a first version. They are
+still roadmap, not v1 scope, and make no regulatory claim: each stays
+behind its assessment in §9.11.
+
+- **Card.** A virtual card that runs on stablecoins and works **only on
+  Niara's own virtual card terminal**: a closed-loop arrangement, with no
+  card network. Every card transaction is recorded on-chain and in the
+  Register.
+  - **Debit and credit versions.** Debit pays from the user's wallet at
+    purchase. The credit version holds the purchase value **in escrow in the
+    user's wallet**; its details will be specified later.
+  - **Open questions (credit version).**
+    - When is the merchant paid: at purchase, from the escrow, or later? If
+      later, the sale creates a card receivable (next item).
+    - Is credit fully collateralized by the escrow (the user locks the whole
+      purchase value), or can the escrow hold less than the purchase, which
+      makes it credit extended by someone?
+- **Card terminal.** Niara's own virtual card terminal, the only place the
+  card works. It records each transaction on-chain, with a fee of 0.1% to
+  0.5% of the transaction.
+- **Card receivables.** Recorded in the Register **in the demo**. A
+  receivable exists **only where the merchant is paid later than the
+  purchase**; a sale paid to the merchant at purchase creates none. The
+  demo record is a Register entry, not the registration of receivables
+  listed in §9.11.
 - **Tokenized receivables anticipation**: a business sells future
   receivables at a discount for immediate payment. Pricing needs the oracle
   (§9.10); card receivables need registration (§9.11). How these tokens map
   to the `Credit` asset class (§1) is to be designed.
-- **Card terminal (POS)** that records each transaction on-chain, with a
-  fee of 0.1% to 0.5% of the transaction. Needs the payment-institution
-  assessment (§9.11).
-- **Payroll**: a company registers the destination self-custody wallets and
-  schedules monthly payments. On-chain programs do not run on a schedule, so
-  each monthly run must be triggered by a transaction (the company signing,
-  or a crank releasing funds the company deposited in advance). Design to be
-  done; needs the labor-law assessment (§9.11).
+- **Payroll.** A multi-payment feature: one company payment to many
+  destination wallets, **stablecoin only**, executed by smart contracts.
+  On-chain programs do not run on a schedule, so each payroll run must be
+  triggered by a transaction (the company signing, or a crank releasing
+  funds the company deposited in advance).
+  - **Labor-law conflict.** Paying salaries of CLT employees in stablecoins
+    conflicts with CLT art. 463, which requires salary to be paid in
+    national currency. Counsel must define the allowed uses (§9.11) before
+    the feature is offered for any payment to employees.
+- **Business solutions** for companies. Scope to be defined.
 - **FX** with stablecoins for BRL, EUR, CHF and GBP (below).
 
 **FX.** Stablecoin FX for neobank services, with stablecoins for **BRL,
@@ -1368,8 +1391,8 @@ or authorized for it.
 
 | Dependency | Service it gates |
 |---|---|
-| A card issuing partner | Digital cards (§9.7) |
-| Payment-institution rules | Card terminal (POS) (§9.7) |
-| Registration of card receivables | Tokenized receivables anticipation (§9.7) |
-| Stablecoin payroll under Brazilian labor law | Payroll (§9.7) |
+| Payment-arrangement and payment-institution rules for a closed-loop card with no card network | Card, debit and credit, and card terminal (§9.7) |
+| Credit rules, if the credit card is not fully collateralized by its escrow | Card, credit version (§9.7) |
+| Registration of card receivables | Card receivables beyond the demo; tokenized receivables anticipation (§9.7) |
+| Stablecoin payments to employees under CLT art. 463 (salary in national currency): counsel defines the allowed uses | Payroll (§9.7) |
 | Authorization as a virtual-asset service provider (VASP) | Which services need it is part of the assessment; FX (§9.7) and the wallet service (§9.8) are the first to check |

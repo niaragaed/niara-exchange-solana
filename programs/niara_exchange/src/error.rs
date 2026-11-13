@@ -108,4 +108,8 @@ pub enum ExchangeError {
     ZeroMatchId,
     #[msg("deal_id must not be all zeros")]
     ZeroDealId,
+    #[msg("An admin change takes effect only when the new admin signs accept_admin")]
+    AdminChangeNeedsAcceptance,
+    #[msg("Signer is not the admin proposed in the pending admin change")]
+    NotPendingAdmin,
 }

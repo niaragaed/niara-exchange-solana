@@ -1,11 +1,13 @@
 mod common;
 
-use anchor_lang::prelude::Pubkey;
+use anchor_lang::{error::ErrorCode as AnchorError, prelude::Pubkey};
 use common::*;
 use niara_exchange::{
-    error::ExchangeError, events::PauseSet, Config, ConfigChange, PendingChange,
-    MAX_FEE_BPS, MAX_TIMELOCK_SECS, MIN_TIMELOCK_SECS,
+    error::ExchangeError,
+    events::{ChangeExecuted, PauseSet},
+    Config, ConfigChange, PendingChange, MAX_FEE_BPS, MAX_TIMELOCK_SECS, MIN_TIMELOCK_SECS,
 };
+use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 // ---- initialize_config -----------------------------------------------------
@@ -267,20 +269,183 @@ fn cancel_frees_the_slot() {
     assert_eq!(env.fetch::<Config>(&config_pda()).fee_bps, 45);
 }
 
+// ---- two-step admin transfer (propose_change + accept_admin) ----------------
+
+/// The admin moves only when the new admin signs `accept_admin` after the
+/// timelock. The new admin holds no SOL and only signs (a member pays the
+/// fee), as a Squads vault does through a vault transaction.
 #[test]
-fn admin_handover_via_timelock() {
+fn admin_transfer_needs_the_new_admins_signature() {
     let mut env = Env::initialized();
     let old_admin = env.admin.insecure_clone();
-    let new_admin = env.funded_keypair();
+    let new_admin = Keypair::new(); // no lamports at all
+    let member = env.funded_keypair(); // pays the transaction fee
     let change = ConfigChange::Admin(new_admin.pubkey());
 
     env.propose(&old_admin, change).unwrap();
     env.warp_secs(TIMELOCK_SECS);
-    env.execute(&old_admin, &change).unwrap();
+    // execute_change cannot install an admin that never signed.
+    assert_custom_err(
+        env.execute(&old_admin, &change),
+        ExchangeError::AdminChangeNeedsAcceptance,
+    );
+    assert_eq!(env.fetch::<Config>(&config_pda()).admin, old_admin.pubkey());
+
+    let pending = pending_pda(&change);
+    let rent = env.svm.get_account(&pending).unwrap().lamports;
+    let old_balance = env.svm.get_balance(&old_admin.pubkey()).unwrap();
+    let accounts = env.accept_admin_accounts(new_admin.pubkey(), &change);
+    let meta = env.accept_admin_with(&member, &new_admin, accounts).unwrap();
 
     assert_eq!(env.fetch::<Config>(&config_pda()).admin, new_admin.pubkey());
+    assert!(!env.exists(&pending), "pending account closed");
+    // The outgoing admin gets back the rent it paid at propose_change.
+    assert_eq!(env.svm.get_balance(&old_admin.pubkey()).unwrap(), old_balance + rent);
+    assert_eq!(env.svm.get_balance(&new_admin.pubkey()).unwrap_or(0), 0);
+    let evs = events::<ChangeExecuted>(&meta);
+    assert_eq!(evs.len(), 1);
+    assert_eq!(evs[0].change, change);
+
+    // Only the new admin acts as admin from now on.
     assert_custom_err(env.pause(&old_admin), ExchangeError::Unauthorized);
+    env.svm.airdrop(&new_admin.pubkey(), 1_000_000_000).unwrap();
     env.pause(&new_admin).unwrap();
+}
+
+#[test]
+fn only_the_proposed_admin_can_accept() {
+    let mut env = Env::initialized();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = env.funded_keypair();
+    let change = ConfigChange::Admin(new_admin.pubkey());
+    env.propose(&old_admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+
+    let stranger = env.funded_keypair();
+    for signer in [&stranger, &old_admin] {
+        let accounts = env.accept_admin_accounts(signer.pubkey(), &change);
+        let res = env.accept_admin_with(signer, signer, accounts);
+        assert_custom_err(res, ExchangeError::NotPendingAdmin);
+    }
+    assert_eq!(env.fetch::<Config>(&config_pda()).admin, old_admin.pubkey());
+    assert!(env.exists(&pending_pda(&change)));
+    env.accept_admin(&new_admin, &change).unwrap();
+}
+
+#[test]
+fn accept_admin_waits_for_the_timelock() {
+    let mut env = Env::initialized();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = env.funded_keypair();
+    let change = ConfigChange::Admin(new_admin.pubkey());
+    env.propose(&old_admin, change).unwrap();
+
+    env.warp_secs(TIMELOCK_SECS - 1);
+    assert_custom_err(
+        env.accept_admin(&new_admin, &change),
+        ExchangeError::TimelockNotElapsed,
+    );
+    env.warp_secs(1);
+    env.accept_admin(&new_admin, &change).unwrap();
+}
+
+/// `accept_admin` only takes the pending admin change, and only with the
+/// current admin as the outgoing admin.
+#[test]
+fn accept_admin_accounts_are_checked() {
+    let mut env = Env::initialized();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = env.funded_keypair();
+
+    // No pending admin change.
+    let change = ConfigChange::Admin(new_admin.pubkey());
+    assert_custom_err(
+        env.accept_admin(&new_admin, &change),
+        AnchorError::AccountNotInitialized,
+    );
+
+    // Another kind's pending change, whatever the signer.
+    let fee = ConfigChange::FeeBps(40);
+    env.propose(&old_admin, fee).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    let accounts = env.accept_admin_accounts(new_admin.pubkey(), &fee);
+    let res = env.accept_admin_with(&new_admin, &new_admin, accounts);
+    assert_custom_err(res, ExchangeError::NotPendingAdmin);
+    assert!(env.exists(&pending_pda(&fee)), "the fee change is untouched");
+
+    // An outgoing admin that is not Config.admin (it would get the rent).
+    env.propose(&old_admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    let mut accounts = env.accept_admin_accounts(new_admin.pubkey(), &change);
+    accounts.admin = new_admin.pubkey();
+    let res = env.accept_admin_with(&new_admin, &new_admin, accounts);
+    assert_custom_err(res, ExchangeError::Unauthorized);
+    assert_eq!(env.fetch::<Config>(&config_pda()).admin, old_admin.pubkey());
+    env.accept_admin(&new_admin, &change).unwrap();
+}
+
+/// The current admin can cancel a transfer until the new admin accepts it.
+#[test]
+fn cancelled_admin_transfer_cannot_be_accepted() {
+    let mut env = Env::initialized();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = env.funded_keypair();
+    let change = ConfigChange::Admin(new_admin.pubkey());
+    env.propose(&old_admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    let stranger = env.funded_keypair();
+    assert_custom_err(env.cancel(&stranger, &change), ExchangeError::Unauthorized);
+    env.cancel(&old_admin, &change).unwrap();
+    assert_custom_err(
+        env.accept_admin(&new_admin, &change),
+        AnchorError::AccountNotInitialized,
+    );
+    assert_eq!(env.fetch::<Config>(&config_pda()).admin, old_admin.pubkey());
+}
+
+/// Admin and timelock actions are never paused (spec §3.3).
+#[test]
+fn admin_transfer_works_while_paused() {
+    let mut env = Env::initialized();
+    let old_admin = env.admin.insecure_clone();
+    let new_admin = env.funded_keypair();
+    env.pause(&old_admin).unwrap();
+    let change = ConfigChange::Admin(new_admin.pubkey());
+    env.propose(&old_admin, change).unwrap();
+    env.warp_secs(TIMELOCK_SECS);
+    env.accept_admin(&new_admin, &change).unwrap();
+    assert!(env.fetch::<Config>(&config_pda()).paused);
+    // The new admin resumes.
+    env.unpause(&new_admin).unwrap();
+}
+
+/// The operational roles rotate through the timelock, by the admin alone
+/// (they do not sign), so a multisig admin can replace a leaked key.
+#[test]
+fn admin_rotates_operator_listing_authority_and_treasury() {
+    let mut env = Env::initialized();
+    let admin = env.admin.insecure_clone();
+    let (operator, authority, treasury) =
+        (Pubkey::new_unique(), Pubkey::new_unique(), Pubkey::new_unique());
+    let changes = [
+        ConfigChange::SettlementOperator(operator),
+        ConfigChange::ListingAuthority(authority),
+        ConfigChange::Treasury(treasury),
+    ];
+    let stranger = env.funded_keypair();
+    for c in changes {
+        assert_custom_err(env.propose(&stranger, c), ExchangeError::Unauthorized);
+        env.propose(&admin, c).unwrap();
+    }
+    env.warp_secs(TIMELOCK_SECS);
+    for c in changes {
+        env.execute(&admin, &c).unwrap();
+    }
+    let config: Config = env.fetch(&config_pda());
+    assert_eq!(
+        (config.settlement_operator, config.listing_authority, config.treasury),
+        (operator, authority, treasury)
+    );
 }
 
 #[test]

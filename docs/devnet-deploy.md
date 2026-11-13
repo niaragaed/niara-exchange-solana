@@ -234,8 +234,25 @@ in the deploy notes.
     --keypair "$DEPLOYER" --url devnet
   ```
 
-  `Config.admin` does not move with it: that is a separate, timelocked
-  `propose_change(Admin)` / `execute_change`.
+  A Squads v4 vault is a PDA and cannot sign a CLI transaction. To hand the
+  upgrade authority to one, replace `--new-upgrade-authority
+  <NEW_AUTHORITY_KEYPAIR>` with `--new-upgrade-authority <VAULT_ADDRESS>
+  --skip-new-upgrade-authority-signer-check`. That drops the typo protection,
+  so check the vault address in the Squads app first.
+
+  `Config.admin` does not move with it. Moving the admin is a separate
+  two-step transfer:
+  1. the current admin signs `propose_change(Admin(<NEW_ADMIN>))`;
+  2. after the 60 s timelock, the new admin signs `accept_admin`. With a
+     Squads vault as the new admin, that is a vault transaction approved by
+     its members.
+
+  `execute_change` refuses an admin change, so the admin can only move to a
+  key that proves it can sign. Until step 2, the current admin can
+  `cancel_change`. The admin alone rotates the listing authority, the
+  settlement operator and the treasury, through `propose_change` and
+  `execute_change`. No script automates any of this, and the Squads path has
+  not been rehearsed yet.
 - Never pass `--final` (to `deploy` or `set-upgrade-authority`): it makes the
   program immutable for good. That is a post-audit production decision.
 

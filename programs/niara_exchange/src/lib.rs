@@ -55,6 +55,12 @@ pub mod niara_exchange {
         instructions::timelock::handle_cancel_change(ctx)
     }
 
+    /// Second step of an admin transfer: the admin proposed by
+    /// `propose_change(Admin)` signs once the timelock has elapsed.
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        instructions::timelock::handle_accept_admin(ctx)
+    }
+
     // ---- Listings -------------------------------------------------------
 
     pub fn submit_listing(

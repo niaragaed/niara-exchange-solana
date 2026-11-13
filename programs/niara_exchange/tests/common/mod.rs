@@ -38,7 +38,7 @@ use litesvm::{
     LiteSVM,
 };
 use niara_exchange::{
-    accounts, instruction, AssetClass, ConfigChange, InitializeConfigParams, CONFIG_SEED,
+    accounts, instruction, AssetClass, Config, ConfigChange, InitializeConfigParams, CONFIG_SEED,
     LISTING_SEED, PENDING_SEED,
 };
 use solana_account::Account;
@@ -414,6 +414,40 @@ impl Env {
     pub fn cancel(&mut self, admin: &Keypair, change: &ConfigChange) -> TransactionResult {
         let ix = ix(self.resolve_accounts(admin, change), instruction::CancelChange {});
         self.send(&[ix], &[admin])
+    }
+
+    /// `accept_admin` accounts for the pending `change`, with the current
+    /// `Config.admin` as the outgoing admin.
+    pub fn accept_admin_accounts(&self, new_admin: Pubkey, change: &ConfigChange) -> accounts::AcceptAdmin {
+        accounts::AcceptAdmin {
+            new_admin,
+            admin: self.fetch::<Config>(&config_pda()).admin,
+            config: config_pda(),
+            pending_change: pending_pda(change),
+            event_authority: event_authority(),
+            program: program_id(),
+        }
+    }
+
+    /// `accept_admin` signed by `new_admin`, with `payer` paying the fee (as a
+    /// multisig member does for a vault transaction).
+    pub fn accept_admin_with(
+        &mut self,
+        payer: &Keypair,
+        new_admin: &Keypair,
+        accounts: accounts::AcceptAdmin,
+    ) -> TransactionResult {
+        let ix = ix(accounts, instruction::AcceptAdmin {});
+        if payer.pubkey() == new_admin.pubkey() {
+            self.send(&[ix], &[new_admin])
+        } else {
+            self.send(&[ix], &[payer, new_admin])
+        }
+    }
+
+    pub fn accept_admin(&mut self, new_admin: &Keypair, change: &ConfigChange) -> TransactionResult {
+        let accounts = self.accept_admin_accounts(new_admin.pubkey(), change);
+        self.accept_admin_with(new_admin, new_admin, accounts)
     }
 
     pub fn submit_listing(

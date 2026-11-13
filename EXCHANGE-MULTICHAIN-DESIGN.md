@@ -156,7 +156,8 @@ interface SettlementAdapter {
 | `withdraw_cashback(amount)` | `listing.issuer` | pull cashback from fee vault (≤ `accrued − withdrawn` of its `CashbackLedger`), to any account of the payment mint except the vault; reverts while `listing.cashback_frozen` (`CashbackFrozen`) |
 | `withdraw_protocol_fees(amount)` | treasury | pull protocol share (≤ `fees_collected − cashback_accrued − protocol_withdrawn` of the `FeeLedger`); can never touch issuers' cashback |
 | `sweep_excess` | treasury | move the fee vault's balance above what the ledger owes (`balance − (fees_collected − protocol_withdrawn − cashback_withdrawn)`, i.e. unaccounted donations) to any account of the payment mint except the vault; fails with `NothingToSweep` when there is none. Ledger untouched; afterwards invariant 4 holds with equality. Emits `ExcessSwept { treasury, payment_mint, destination, amount, vault_balance_after }` |
-| `propose_change` / `execute_change` | admin | timelocked fee/cashback/operator/authority/fee-mint changes (fee-mint switch: §3.4) |
+| `propose_change` / `execute_change` / `cancel_change` | admin | timelocked fee/cashback/operator/listing-authority/treasury/fee-mint changes (fee-mint switch: §3.4); the outgoing roles do not sign, so the admin alone can rotate a leaked key. An `Admin` change is proposed and cancelled here, but `execute_change` refuses it (`AdminChangeNeedsAcceptance`) |
+| `accept_admin` | the proposed admin | second step of an admin transfer: once the timelock of a pending `ConfigChange::Admin(new_admin)` has elapsed, `new_admin` signs and becomes `Config.admin` (`NotPendingAdmin` for any other signer). Proves the new key can sign, so a typo cannot lose the admin. The new admin only signs (pays nothing, is not written), so a Squads v4 vault can accept through a vault transaction. The pending account's rent goes back to the outgoing admin. Emits `ChangeExecuted` |
 | `pause` / `unpause` | admin | circuit breaker (see below) |
 
 **Pause principle.** A pause stops the protocol from paying out based on its
@@ -172,7 +173,8 @@ deposit. While `paused`:
   `list_currency`, `approve_listing`, `suspend_listing`, `delist`,
   `freeze_cashback`, `unfreeze_cashback`),
   `request_issuance` and `reject_issuance` (neither mints),
-  `init_cashback_ledger`, `init_fee_vault`, and admin/timelock actions.
+  `init_cashback_ledger`, `init_fee_vault`, and admin/timelock actions
+  (including `accept_admin`).
 
 Listing status gates trading, not payouts: accrued cashback and protocol fees
 stay withdrawable after the asset is delisted or the currency is suspended.

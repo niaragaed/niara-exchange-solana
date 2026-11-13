@@ -1,6 +1,6 @@
 //! Invariant fuzzing (spec §3.9): `proptest` drives random sequences of valid
 //! and invalid instructions against the real `.so` in LiteSVM, and checks
-//! invariants 1 to 12 after every step.
+//! invariants 1 to 13 after every step.
 //!
 //! Each case builds a fresh world:
 //! - listings: two `Equity` (SPL Token, Token-2022), one `FixedIncome`, one
@@ -37,6 +37,15 @@
 //! every deal party are modelled, so a deposit that is stranded or paid twice
 //! fails the run, and each vault must hold exactly its deposit while the deal
 //! is open and be closed afterwards.
+//! Listing fee (invariant 13, spec §3.13): the four trading listings are
+//! approved by quote + payment at setup, and three more issuer listings
+//! (Equity, FixedIncome, Credit) start `Pending`. Random `quote_listing`
+//! (valuation 0, rates 0 or above the 1% cap, expiries in and out of the
+//! 30-day window, wrong signers, already-paid and Currency listings) and
+//! `pay_listing_fee` (wrong signers, expired quotes, paused, double payment)
+//! have their outcome predicted exactly, and so do the status actions, so
+//! `approve_listing` never approves an unpaid listing. Issuance requests on
+//! the new listings run while `Pending` or `Quoted` and execute only once paid.
 //! `PROPTEST_CASES` overrides the number of cases (default 48).
 
 mod common;
@@ -49,10 +58,15 @@ use std::{
 use anchor_lang::prelude::Pubkey;
 use common::*;
 use niara_exchange::{
-    events::{DealExecuted, DealOpened, IssuanceExecuted, Settled, TokensBurned},
+    error::ExchangeError,
+    events::{
+        DealExecuted, DealOpened, IssuanceExecuted, ListingApproved, ListingFeePaid,
+        ListingQuoted, Settled, TokensBurned,
+    },
     math::{split_payment, PaymentSplit},
     AssetClass, BurnReason, CashbackLedger, Config, ConfigChange, DealSide, DealStatus, FeeLeg,
     Listing, ListingStatus, BPS_DENOMINATOR, MAX_DEAL_DURATION_SECS, MAX_FEE_BPS,
+    MAX_LISTING_FEE_BPS, MAX_QUOTE_DURATION_SECS,
 };
 use proptest::{
     prelude::*,
@@ -69,8 +83,19 @@ const CR: usize = 3; // Credit
 const USD: usize = 4; // Currency, the fee mint (USDT), SPL Token or Token-2022
 const BRL: usize = 5; // Currency, Token-2022
 const EUR: usize = 6; // Currency, SPL Token
+/// The listings with trader fixtures, cashback ledgers and destinations.
 const LISTINGS: usize = 7;
 const CURRENCIES: [usize; 3] = [USD, BRL, EUR];
+// Issuer listings submitted at setup and left `Pending`: quoted and paid
+// during the run (invariant 13). No trader fixtures.
+const NEW_EQ: usize = 7;
+const NEW_FI: usize = 8;
+const NEW_CR: usize = 9;
+const NEW_LISTINGS: [usize; 3] = [NEW_EQ, NEW_FI, NEW_CR];
+const ALL_LISTINGS: usize = 10;
+/// USD held by each new listing's issuer (and the intruder) to pay listing
+/// fees: more than any fee (at most 1% of `u64::MAX`, rounded up).
+const FEE_SOURCE_BALANCE: u64 = 1_000_000_000_000_000_000;
 
 /// (asset, payment) of every trader pair. The first two are the valid
 /// markets; the rest must never settle.
@@ -134,6 +159,11 @@ static DEAL_REFUND_REJECTED: AtomicU64 = AtomicU64::new(0);
 static FREEZE_CHANGES: AtomicU64 = AtomicU64::new(0);
 static FROZEN_WITHDRAW_REJECTED: AtomicU64 = AtomicU64::new(0);
 static ZERO_ID_REJECTED: AtomicU64 = AtomicU64::new(0);
+static QUOTE_OK: AtomicU64 = AtomicU64::new(0);
+static QUOTE_REJECTED: AtomicU64 = AtomicU64::new(0);
+static PAY_OK: AtomicU64 = AtomicU64::new(0);
+static PAY_REJECTED: AtomicU64 = AtomicU64::new(0);
+static FEE_BYPASS_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum StatusOp {
@@ -195,6 +225,10 @@ enum Action {
     DonateToDeal { deal: usize, amount: u64 },
     /// `freeze_cashback` / `unfreeze_cashback` on any listing.
     CashbackFreeze { listing: usize, freeze: bool, intruder: bool },
+    /// `quote_listing` with `expires_at = now + ttl`.
+    QuoteListing { listing: usize, valuation: u64, bps: u16, ttl: i64, intruder: bool },
+    /// `pay_listing_fee`. `prefer_quoted`: target a quoted new listing, if any.
+    PayListingFee { listing: usize, intruder: bool, prefer_quoted: bool },
 }
 
 /// The model of one deal opened during the run.
@@ -219,8 +253,13 @@ fn max_fee(amount: u64) -> u64 {
     (u128::from(amount) * u128::from(MAX_FEE_BPS)).div_ceil(u128::from(BPS_DENOMINATOR)) as u64
 }
 
+/// `ceil(valuation * bps / 10_000)`, computed independently of the program.
+fn expected_listing_fee(valuation: u64, bps: u16) -> u64 {
+    (u128::from(valuation) * u128::from(bps)).div_ceil(u128::from(BPS_DENOMINATOR)) as u64
+}
+
 /// Listings with an issuer, so with Niara-approved issuance.
-const ISSUER_LISTINGS: [usize; 4] = [E0, E1, FI, CR];
+const ISSUER_LISTINGS: [usize; 7] = [E0, E1, FI, CR, NEW_EQ, NEW_FI, NEW_CR];
 
 fn action() -> impl Strategy<Value = Action> {
     let pair = prop_oneof![4 => 0..VALID_PAIRS, 1 => 0..PAIRS.len()];
@@ -246,7 +285,7 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(StatusOp::Delist),
     ];
     let status =
-        (0..LISTINGS, status_op).prop_map(|(listing, op)| Action::Status { listing, op });
+        (0..ALL_LISTINGS, status_op).prop_map(|(listing, op)| Action::Status { listing, op });
     let permille = prop_oneof![4 => 0u16..=1000, 1 => 1001u16..1100];
     // Mostly the fee mint; the others have no fee vault, so must always fail.
     let currency = || prop_oneof![6 => Just(USD), 1 => Just(BRL), 1 => Just(EUR)];
@@ -377,6 +416,45 @@ fn action() -> impl Strategy<Value = Action> {
                 freeze,
                 intruder,
             }),
+        // Mostly the new listings; E0 (already paid) and the currencies must
+        // always be refused.
+        4 => (
+            prop::sample::select(vec![NEW_EQ, NEW_FI, NEW_CR, NEW_EQ, NEW_FI, NEW_CR, E0, USD, BRL]),
+            prop_oneof![
+                8 => 1u64..10_000_000_000_000,
+                1 => Just(0u64),
+                1 => Just(u64::MAX),
+            ],
+            prop_oneof![
+                8 => 1u16..=MAX_LISTING_FEE_BPS,
+                1 => Just(0u16),
+                1 => (MAX_LISTING_FEE_BPS + 1)..=u16::MAX,
+            ],
+            prop_oneof![
+                8 => 1i64..2 * TIMELOCK_SECS,
+                1 => -100i64..=0,
+                1 => Just(MAX_QUOTE_DURATION_SECS),
+                1 => Just(MAX_QUOTE_DURATION_SECS + 1),
+            ],
+            prop::bool::weighted(0.1),
+        )
+            .prop_map(|(listing, valuation, bps, ttl, intruder)| Action::QuoteListing {
+                listing,
+                valuation,
+                bps,
+                ttl,
+                intruder,
+            }),
+        4 => (
+            prop::sample::select(vec![NEW_EQ, NEW_FI, NEW_CR, E0]),
+            prop::bool::weighted(0.1),
+            prop::bool::weighted(0.7),
+        )
+            .prop_map(|(listing, intruder, prefer_quoted)| Action::PayListingFee {
+                listing,
+                intruder,
+                prefer_quoted,
+            }),
     ]
 }
 
@@ -409,6 +487,12 @@ struct World {
     deals: Vec<TrackedDeal>,
     /// Modelled balance of every deal party's token accounts (invariant 6).
     party_balances: HashMap<Pubkey, u64>,
+    /// Per new listing: its issuer's USD account, which pays the listing fee.
+    fee_sources: HashMap<usize, Pubkey>,
+    /// The intruder's USD account, for payments it is not allowed to make.
+    intruder_usd: Pubkey,
+    /// Σ `ListingFeePaid` amounts, setup included (invariant 13).
+    listing_fees_paid: u64,
 }
 
 impl World {
@@ -442,6 +526,26 @@ impl World {
         for program in [TOKEN_2022, SPL_TOKEN] {
             mints.push(env.listed_currency(program));
             issuers.push(env.funded_keypair());
+        }
+        // The four listings above paid the fixture listing fee to be approved.
+        assert_eq!(env.fee_ledger(&usd).listing_fees_collected, 4 * LISTING_FEE);
+        // New issuer listings, left `Pending`, each issuer with USD to pay.
+        let usd_program = env.owner_of(&usd);
+        let mut fee_sources = HashMap::new();
+        for (index, class) in NEW_LISTINGS
+            .into_iter()
+            .zip([AssetClass::Equity, AssetClass::FixedIncome, AssetClass::Credit])
+        {
+            let issuer = env.funded_keypair();
+            let mint = env.create_mint(SPL_TOKEN, Some(issuer.pubkey()));
+            env.set_mint_decimals(&mint, ASSET_DECIMALS);
+            env.submit_listing(&issuer, mint, class, DOC_HASH).unwrap();
+            let source =
+                env.create_token_account(usd_program, usd, issuer.pubkey(), FEE_SOURCE_BALANCE);
+            fee_sources.insert(index, source);
+            assert_eq!(mints.len(), index);
+            mints.push(mint);
+            issuers.push(issuer);
         }
 
         let payer = env.admin.insecure_clone();
@@ -495,6 +599,8 @@ impl World {
         }
 
         let intruder = env.funded_keypair();
+        let intruder_usd =
+            env.create_token_account(usd_program, usd, intruder.pubkey(), FEE_SOURCE_BALANCE);
         let mut deal_parties = Vec::new();
         let mut intruder_accounts = Vec::new();
         let mut party_balances = HashMap::new();
@@ -520,6 +626,9 @@ impl World {
             deal_parties.push(p);
         }
         World {
+            fee_sources,
+            intruder_usd,
+            listing_fees_paid: 4 * LISTING_FEE,
             deal_parties,
             intruder_accounts,
             deals: Vec::new(),
@@ -565,15 +674,7 @@ impl World {
                 id,
                 intruder,
             } => self.settle(pair, assets, payment, id, intruder)?,
-            Action::Status { listing, op } => {
-                let authority = self.env.listing_authority.insecure_clone();
-                let mint = self.mints[listing];
-                let _ = match op {
-                    StatusOp::Approve => self.env.approve(&authority, mint),
-                    StatusOp::Suspend => self.env.suspend(&authority, mint),
-                    StatusOp::Delist => self.env.delist(&authority, mint),
-                };
-            }
+            Action::Status { listing, op } => self.status(listing, op)?,
             Action::Pause => {
                 let admin = self.env.admin.insecure_clone();
                 let _ = self.env.pause(&admin);
@@ -674,7 +775,176 @@ impl World {
                 freeze,
                 intruder,
             } => self.cashback_freeze(listing, freeze, intruder)?,
+            Action::QuoteListing {
+                listing,
+                valuation,
+                bps,
+                ttl,
+                intruder,
+            } => self.quote_listing(listing, valuation, bps, ttl, intruder)?,
+            Action::PayListingFee {
+                listing,
+                intruder,
+                prefer_quoted,
+            } => {
+                let listing = if prefer_quoted {
+                    NEW_LISTINGS
+                        .into_iter()
+                        .find(|&l| self.listing(l).status == ListingStatus::Quoted)
+                        .unwrap_or(listing)
+                } else {
+                    listing
+                };
+                self.pay_listing_fee(listing, intruder)?
+            }
         }
+        Ok(())
+    }
+
+    /// Listing authority status changes, predicted from the status alone:
+    /// `approve_listing` only reinstates (`Suspended`), and refuses an unpaid
+    /// (`Pending`/`Quoted`) listing with `ListingFeeNotPaid`.
+    fn status(&mut self, listing: usize, op: StatusOp) -> Result<(), TestCaseError> {
+        use ListingStatus::*;
+        let authority = self.env.listing_authority.insecure_clone();
+        let mint = self.mints[listing];
+        let before = self.env.listing(&mint).status;
+        let res = match op {
+            StatusOp::Approve => self.env.approve(&authority, mint),
+            StatusOp::Suspend => self.env.suspend(&authority, mint),
+            StatusOp::Delist => self.env.delist(&authority, mint),
+        };
+        let expected = match op {
+            StatusOp::Approve => (before == Suspended).then_some(Approved),
+            StatusOp::Suspend => (before == Approved).then_some(Suspended),
+            StatusOp::Delist => (before != Delisted).then_some(Delisted),
+        };
+        let error = res.as_ref().err().map(|e| format!("{:?}", e.err));
+        prop_assert_eq!(res.is_ok(), expected.is_some(), "{:?} on a {:?} listing", op, before);
+        prop_assert_eq!(self.env.listing(&mint).status, expected.unwrap_or(before));
+        if matches!(op, StatusOp::Approve) && matches!(before, Pending | Quoted) {
+            FEE_BYPASS_REJECTED.fetch_add(1, Relaxed);
+            let code = format!("Custom({})", u32::from(ExchangeError::ListingFeeNotPaid));
+            prop_assert!(error.unwrap_or_default().contains(&code), "bypass refused with another error");
+        }
+        Ok(())
+    }
+
+    /// `quote_listing`, predicted exactly (spec §3.13).
+    fn quote_listing(
+        &mut self,
+        listing: usize,
+        valuation: u64,
+        bps: u16,
+        ttl: i64,
+        intruder: bool,
+    ) -> Result<(), TestCaseError> {
+        let mint = self.mints[listing];
+        let before = self.env.listing(&mint);
+        let now = self.env.now();
+        let expires_at = now.saturating_add(ttl);
+        let signer = if intruder {
+            self.intruder.insecure_clone()
+        } else {
+            self.env.listing_authority.insecure_clone()
+        };
+        let res = self.env.quote_listing(&signer, mint, valuation, bps, expires_at);
+        let expected_ok = !intruder
+            && before.asset_class != AssetClass::Currency
+            && matches!(before.status, ListingStatus::Pending | ListingStatus::Quoted)
+            && valuation > 0
+            && (1..=MAX_LISTING_FEE_BPS).contains(&bps)
+            && expires_at > now
+            && expires_at <= now + MAX_QUOTE_DURATION_SECS;
+        prop_assert_eq!(
+            res.is_ok(),
+            expected_ok,
+            "quote_listing on {} ({:?}): valuation {}, {} bps, ttl {}",
+            listing,
+            before.status,
+            valuation,
+            bps,
+            ttl
+        );
+        let after = self.env.listing(&mint);
+        let Ok(meta) = res else {
+            QUOTE_REJECTED.fetch_add(1, Relaxed);
+            prop_assert_eq!(after.status, before.status);
+            prop_assert_eq!(
+                (after.valuation, after.listing_fee_bps, after.listing_fee),
+                (before.valuation, before.listing_fee_bps, before.listing_fee)
+            );
+            prop_assert_eq!(after.quote_expires_at, before.quote_expires_at);
+            return Ok(());
+        };
+        QUOTE_OK.fetch_add(1, Relaxed);
+        let fee = expected_listing_fee(valuation, bps);
+        prop_assert_eq!(after.status, ListingStatus::Quoted);
+        prop_assert_eq!((after.valuation, after.listing_fee_bps, after.listing_fee), (valuation, bps, fee));
+        prop_assert_eq!(after.listing_fee_mint, self.config().fee_mint);
+        prop_assert_eq!((after.quote_expires_at, after.listing_fee_paid), (expires_at, 0));
+        let e = &events::<ListingQuoted>(&meta)[0];
+        prop_assert_eq!((e.valuation, e.listing_fee_bps, e.listing_fee), (valuation, bps, fee));
+        prop_assert_eq!(e.expires_at, expires_at);
+        Ok(())
+    }
+
+    /// `pay_listing_fee`, predicted exactly: the fee moves from the issuer to
+    /// the fee vault once, and the listing becomes `Approved`.
+    fn pay_listing_fee(&mut self, listing: usize, intruder: bool) -> Result<(), TestCaseError> {
+        let mint = self.mints[listing];
+        let before = self.env.listing(&mint);
+        let usd = self.mints[USD];
+        let (signer, source) = if intruder {
+            (self.intruder.insecure_clone(), self.intruder_usd)
+        } else if let Some(&source) = self.fee_sources.get(&listing) {
+            (self.issuers[listing].insecure_clone(), source)
+        } else {
+            (self.issuers[listing].insecure_clone(), self.issuer_dests[&(listing, USD)])
+        };
+        let vault = fee_vault_pda(&usd);
+        let vault_before = self.env.balance(&vault);
+        let source_before = self.env.balance(&source);
+        let ledger_before = self.env.fee_ledger(&usd).listing_fees_collected;
+        let config = self.config();
+        let now = self.env.now();
+        let accounts = self.env.pay_accounts(signer.pubkey(), mint, source);
+        let res = self.env.pay_listing_fee_with(&signer, &accounts);
+        let expected_ok = !intruder
+            && !config.paused
+            && before.status == ListingStatus::Quoted
+            && now < before.quote_expires_at
+            && before.listing_fee_mint == config.fee_mint;
+        prop_assert_eq!(
+            res.is_ok(),
+            expected_ok,
+            "pay_listing_fee on {} ({:?}, paused {})",
+            listing,
+            before.status,
+            config.paused
+        );
+        let after = self.env.listing(&mint);
+        let ledger = self.env.fee_ledger(&usd).listing_fees_collected;
+        let Ok(meta) = res else {
+            PAY_REJECTED.fetch_add(1, Relaxed);
+            prop_assert_eq!(self.env.balance(&vault), vault_before, "failed payment moved funds");
+            prop_assert_eq!(self.env.balance(&source), source_before);
+            prop_assert_eq!(ledger, ledger_before);
+            prop_assert_eq!((after.status, after.listing_fee_paid), (before.status, before.listing_fee_paid));
+            return Ok(());
+        };
+        PAY_OK.fetch_add(1, Relaxed);
+        let fee = before.listing_fee;
+        prop_assert_eq!(fee, expected_listing_fee(before.valuation, before.listing_fee_bps));
+        prop_assert_eq!(self.env.balance(&vault) - vault_before, fee);
+        prop_assert_eq!(source_before - self.env.balance(&source), fee);
+        prop_assert_eq!(ledger - ledger_before, fee);
+        prop_assert_eq!(after.status, ListingStatus::Approved);
+        prop_assert_eq!((after.listing_fee_paid, after.approved_at), (fee, now));
+        let paid = &events::<ListingFeePaid>(&meta)[0];
+        prop_assert_eq!((paid.amount, paid.valuation, paid.listing_fee_bps), (fee, before.valuation, before.listing_fee_bps));
+        prop_assert_eq!(events::<ListingApproved>(&meta).len(), 1);
+        self.listing_fees_paid += fee;
         Ok(())
     }
 
@@ -743,7 +1013,10 @@ impl World {
         let res = self
             .env
             .request_issuance(&signer, mint, amount, recipient, ISSUANCE_DOC);
-        let issuable = matches!(before.status, ListingStatus::Pending | ListingStatus::Approved);
+        let issuable = matches!(
+            before.status,
+            ListingStatus::Pending | ListingStatus::Quoted | ListingStatus::Approved
+        );
         if res.is_err() {
             prop_assert!(
                 intruder || !issuable || amount == 0,
@@ -1534,6 +1807,51 @@ impl World {
             );
         }
 
+        // Invariant 13: every listing that is or was approved paid its quoted
+        // fee exactly once, and the ledger sums the payments.
+        {
+            use ListingStatus::*;
+            let mut paid = 0u64;
+            for (index, mint) in self.mints.iter().enumerate() {
+                let l = self.env.listing(mint);
+                if l.asset_class == AssetClass::Currency {
+                    prop_assert_eq!(
+                        (l.valuation, l.listing_fee, l.listing_fee_paid),
+                        (0, 0, 0),
+                        "listing fee on currency {}",
+                        index
+                    );
+                    prop_assert_eq!(l.listing_fee_bps, 0);
+                    continue;
+                }
+                prop_assert!(
+                    l.listing_fee_paid == 0 || l.listing_fee_paid == l.listing_fee,
+                    "listing {} paid {} of a {} fee",
+                    index,
+                    l.listing_fee_paid,
+                    l.listing_fee
+                );
+                if l.listing_fee > 0 || l.listing_fee_bps > 0 {
+                    prop_assert!((1..=MAX_LISTING_FEE_BPS).contains(&l.listing_fee_bps));
+                    prop_assert_eq!(l.listing_fee, expected_listing_fee(l.valuation, l.listing_fee_bps));
+                    prop_assert!(l.listing_fee >= 1);
+                }
+                match l.status {
+                    Approved | Suspended => {
+                        prop_assert!(l.listing_fee_paid > 0, "listing {} is {:?} unpaid", index, l.status);
+                    }
+                    Pending | Quoted => {
+                        prop_assert_eq!(l.listing_fee_paid, 0);
+                    }
+                    Delisted => {}
+                }
+                paid += l.listing_fee_paid;
+            }
+            let ledger = self.env.fee_ledger(&self.mints[USD]);
+            prop_assert_eq!(ledger.listing_fees_collected, paid, "ledger vs listings");
+            prop_assert_eq!(ledger.listing_fees_collected, self.listing_fees_paid, "ledger vs ListingFeePaid events");
+        }
+
         // Invariant 11: supply == Σ executed batches − Σ burns, on-chain
         // counters and events agreeing.
         for listing in ISSUER_LISTINGS {
@@ -1626,6 +1944,13 @@ fn invariants_hold_under_random_instruction_sequences() {
     let (freezes, frozen_rejected) =
         (FREEZE_CHANGES.load(Relaxed), FROZEN_WITHDRAW_REJECTED.load(Relaxed));
     let zero_ids = ZERO_ID_REJECTED.load(Relaxed);
+    let (q_ok, q_rejected) = (QUOTE_OK.load(Relaxed), QUOTE_REJECTED.load(Relaxed));
+    let (p_ok, p_rejected) = (PAY_OK.load(Relaxed), PAY_REJECTED.load(Relaxed));
+    let bypass = FEE_BYPASS_REJECTED.load(Relaxed);
+    println!(
+        "listing fee: quotes ok {q_ok} / rejected {q_rejected}; payments ok {p_ok} / \
+         rejected {p_rejected}; approve_listing on unpaid listings refused {bypass}"
+    );
     println!(
         "settle ok {ok} / rejected {rejected}; withdraw ok {w_ok} / rejected {w_rejected}; \
          sweep ok {s_ok} / rejected {s_rejected}; batches executed {issued}; \
@@ -1648,6 +1973,9 @@ fn invariants_hold_under_random_instruction_sequences() {
     );
     assert!(freezes > 0 && frozen_rejected > 0, "cashback freeze not exercised");
     assert!(zero_ids > 0, "zero match and deal ids not exercised");
+    assert!(q_ok > 0 && q_rejected > 0, "quote_listing outcomes not exercised");
+    assert!(p_ok > 0 && p_rejected > 0, "pay_listing_fee outcomes not exercised");
+    assert!(bypass > 0, "approve_listing bypass not exercised");
 }
 
 /// Deterministic sweep of invariants 6 and 7: on every valid P2P pair and both

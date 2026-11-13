@@ -520,10 +520,21 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   four issuer listings: `request_issuance` (incl. zero amounts, wrong
   signers, suspended/delisted listings), `approve_issuance`/`reject_issuance`
   of the oldest open batch (incl. wrong signers, non-`Approved` listings,
-  paused protocol) and `burn_with_reason` (incl. overdraws). Invariants 1 to
-  12 are checked after every step (4 as `vault ==
+  paused protocol) and `burn_with_reason` (incl. overdraws). Listing fee
+  (§3.13): the four trading listings are approved by quote and payment at
+  setup, and three more issuer listings (`Equity`, `FixedIncome`, `Credit`)
+  start `Pending`; random `quote_listing` (zero valuation, rates of 0 or
+  above the 1% cap, expiries in and out of the 30-day window, wrong
+  signers, already-paid and `Currency` listings) and `pay_listing_fee`
+  (wrong signers, expired quotes, paused, double payment) have their
+  outcome predicted exactly, as do the listing status actions, so
+  `approve_listing` never approves an unpaid listing; issuance on the new
+  listings is requested while `Pending` or `Quoted` and executes only once
+  paid. Invariants 1 to 13 are checked after every step (4 as `vault ==
   unwithdrawn + unswept donations`, so strict equality after every sweep; 11
-  also checks the mint authority is still the program PDA), the fee ledgers
+  also checks the mint authority is still the program PDA; 13 also
+  cross-checks the ledger's listing fees against the `ListingFeePaid`
+  events), the fee ledgers
   are cross-checked against the sum of `Settled` events, and
   `issued`/`burned` against `IssuanceExecuted`/`TokensBurned`. `PROPTEST_CASES`
   sets the number of sequences (default 48). A mutation check (cashback

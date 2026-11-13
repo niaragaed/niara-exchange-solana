@@ -698,7 +698,10 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
 - Asset classes: `Equity`, `FixedIncome`, `Credit`, `Currency` (extend the existing
   enum or map). `Currency` listings are created by LISTING_AUTHORITY_ROLE, never
   cashback-eligible.
-- Deploy scripts with chainid guards: Sepolia `11155111`, Base Sepolia `84532`.
+- **v1 deploy scripts, written and not broadcast yet**: two phases, with chainid
+  guards so they run on Sepolia `11155111` and Base Sepolia `84532` only,
+  keystore signers, and mock USDT / BRL test tokens as the listed currencies,
+  like `scripts/setup.ts` on Solana.
 - Same invariant fuzzing suite extended with the listing invariant.
 - **`P2PEscrow`** (EVM mirror of 3.5), **implemented**: `openDeal` (deposit),
   `acceptDeal(dealKey)` (atomic swap + fee + cashback via `CashbackDistributor`),
@@ -706,8 +709,10 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
   Accepts only `FixedIncome`/`Credit`/`Currency` listings. What it shares with
   the Solana escrow and where it differs: §4.2.
 
-Note: verify whether the July 2026 Sepolia deployment of niara-contracts is still
-live and documented; v1 needs a **new deployment anyway** (new registry + factory).
+Note: v1 is a **new deployment** (new registry + factory), made with the deploy
+scripts above; nothing of v1 has been broadcast on EVM yet. Whether the July
+2026 Sepolia deployment of niara-contracts is still live and documented is
+still to be verified; v1 does not depend on it.
 
 ### 4.1 Listing events for the Register indexer
 
@@ -752,7 +757,10 @@ Aligned on both chains:
   the same error name: `ZeroSellerProceeds` on Solana (`settle`, `open_deal`),
   `ZeroSellerProceeds()` on EVM (`settle`, `openDeal`);
 - **fee cap 0.5%** (business rule, §3.4): `fee_bps ≤ 50` on both chains. Solana:
-  `MAX_FEE_BPS = 50`; the EVM cap must be set to the same value;
+  `MAX_FEE_BPS = 50`; EVM: `NiaraSettlement.MAX_FEE_BPS = 50`;
+- **cashback share at deployment: 2000 bps** (20% of the fee) on both chains. EVM sets
+  it in the `CashbackDistributor` constructor; Solana in `initialize_config`
+  (the `scripts/setup.ts` default);
 - **P2P escrow** (§3.5; EVM `P2PEscrow`): the same asset classes
   (`FixedIncome`/`Credit`/`Currency`, never `Equity`); a named counterparty (no open
   offers); expiry at most 30 days ahead; `fee_bps` and `cashback_bps` snapshotted on the
@@ -783,11 +791,11 @@ What still differs, on purpose:
 | Asset token origin | Issuer creates the mint; `submit_listing` checks `supply == 0` and moves the mint authority to the program PDA | Issuer deploys through `AssetTokenFactory`; the token's only minter is the `ListingRegistry` from birth (no hand-over, no "finish metadata first" step) | An EVM token's code is fixed at deploy, so a factory gives a known implementation; on Solana the issuer's mint must be accepted and checked |
 | Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
 | Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
-| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together; `cancel_deal`/`expire_deal` never read it | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle`, both `CashbackDistributor` withdrawals and `P2PEscrow.openDeal`/`acceptDeal` read it (`ProtocolPausable`, `EnforcedPause()`); those contracts have no pause of their own, and `cancelDeal`/`expireDeal` never read it. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
+| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together; `cancel_deal`/`expire_deal` never read it | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle`, both `CashbackDistributor` withdrawals and `P2PEscrow.openDeal`/`acceptDeal`/`sweepExcess` read it (`ProtocolPausable`, `EnforcedPause()`); those contracts have no pause of their own, and `cancelDeal`/`expireDeal` never read it. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
 | Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
 | Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
 | Issuance destination | Batch names a wallet; `approve_issuance` takes any token account owned by it; `IssuanceExecuted` has `destination` | Batch names an address that receives the mint; `IssuanceExecuted` has no `destination` | ERC-20 balances live at the address, no separate token account |
-| Event vs effect order | `approve_issuance` mints, then updates state and emits. The escrow instructions do the same: token transfers and vault close first, then the deal status and the event | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md). The `P2PEscrow` functions do the same: deal status and event first, then the token transfers | EVM external calls can re-enter; SPL token CPIs cannot |
+| Event vs effect order | `approve_issuance` mints, then updates state and emits. The escrow instructions do the same: token transfers and vault close first, then the deal status and the event. `withdraw_cashback` and `withdraw_protocol_fees` update the ledger, transfer, then emit | `approveIssuance` marks the batch, emits `IssuanceExecuted`, then mints (checks-effects-interactions, see CLAUDE.md). The `P2PEscrow` functions do the same: deal status and event first, then the token transfers. Both `CashbackDistributor` withdrawals also emit before the transfer | EVM external calls can re-enter; SPL token CPIs cannot |
 | Deal identity | One `Deal` account per deal, the PDA `["deal", proposer, deal_id]`; `accept_deal`, `cancel_deal` and `expire_deal` take that account | A storage entry keyed by `dealKey = keccak256(proposer, dealId)`; `acceptDeal(dealKey)` and the refund functions take the key | Solana addresses state by account, EVM by mapping key. Both scope the id to the proposer, so two proposers can use the same `deal_id` |
 | Tokens sent to the escrow | Every exit releases the deal vault's whole balance; the excess goes with the deposit and is reported as `vault_excess` (§3.5) | Every exit moves exactly the deposit; tokens sent to the contract stay there until the treasury takes them with `sweepExcess` | A Solana token account can only be closed empty and each deal has its own vault, so the excess must leave with the deposit. On EVM one contract holds every deposit: a stray transfer blocks nothing and belongs to no deal |
 | Deal fee accounting | `accept_deal` updates the `FeeLedger` and the `CashbackLedger` itself (same program as `settle`) | `P2PEscrow` calls `CashbackDistributor.recordDealFee`, which only `ESCROW_ROLE` may call | On EVM the escrow and the distributor are separate contracts, so the distributor must restrict who can record a fee |

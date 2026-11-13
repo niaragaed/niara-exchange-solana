@@ -51,8 +51,12 @@ if ! probe="$(systemd-run --user --scope --quiet -p MemoryMax=1G true 2>&1)"; th
 fi
 
 status=0
+# OOMPolicy=continue: the kernel OOM-kills the process that broke the cap
+# (SIGKILL, exit 137) and the wrapper survives to report it. With the default
+# (stop), systemd also SIGTERMs the wrapper and the caller only sees 143.
 NIARA_MEM_CAP_ACTIVE=1 systemd-run --user --scope --quiet \
   -p "MemoryMax=${NIARA_MEM_CAP}" -p "MemorySwapMax=${NIARA_SWAP_CAP}" \
+  -p OOMPolicy=continue \
   bash "$0" "$@" || status=$?
 if [[ $status -eq 137 || $status -eq 143 ]]; then
   echo "mem-cap: killed (exit $status), most likely by the ${NIARA_MEM_CAP} memory cap" >&2

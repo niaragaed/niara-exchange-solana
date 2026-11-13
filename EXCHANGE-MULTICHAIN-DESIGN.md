@@ -45,12 +45,23 @@ A peer-to-peer tokenized securities exchange with **self-custody** and **curated
      its side in a per-deal escrow PDA, naming the counterparty (v1 has no
      open offers). The counterparty's acceptance executes the swap
      atomically. No operator is involved and the operator does not need to be trusted.
-4. **Fees and issuer cashback, always in USDT.** Each settlement or deal
-   charges a protocol fee in one currency, the **fee mint** (USDT, set in
-   `Config`): the party that receives USDT pays the fee, out of the USDT it
-   receives. A share of that fee is credited to the issuer (pull model), so
-   cashback is always in USDT too (§3.4). **The fee is at most 0.5%**
-   (business rule), enforced on-chain as a hard cap.
+4. **Revenue: two fees, both in USDT. No custody fee.**
+   - **Trading fee**, on every settlement and deal: 0.1% to 0.5% of the
+     trade, charged in the **fee mint** (USDT, set in `Config`). The party
+     that receives USDT pays it, out of the USDT it receives (§3.4). On-chain
+     only the cap is enforced: `fee_bps ≤ MAX_FEE_BPS = 50` (0.5%). The 0.1%
+     floor is pricing policy; the program accepts any rate from 0 to 50 bps.
+   - **Listing fee**, once per listing: 0.1% to 1% of the issuer's valuation,
+     charged **off-chain** in USDT when Niara approves the listing and paid to
+     the treasury; the Register records the payment transaction. The program
+     neither charges nor checks it: `approve_listing` moves no tokens.
+   - **No custody fee.** Niara never holds the users' assets: tokens stay in
+     the owners' wallets, or in a per-deal escrow only while a deal is open
+     (§3.5).
+   - **Issuer cashback** is a share of the trading fee only, credited to the
+     issuer (pull model), so it is in USDT too: 20% at deployment
+     (`cashback_bps = 2000`), changed only through the timelock. The listing
+     fee earns no cashback.
 
 Accurate one-line description for pitches:
 **"Off-chain matching, atomic on-chain settlement, self-custody, curated listing."**
@@ -405,9 +416,10 @@ program's upgrade authority can replace the program, and with it every rule
 above, including the admin timelock: an upgrade takes effect immediately and is
 not subject to `propose_change` / `execute_change`. In v1 (testnet) the upgrade
 authority is a **single key**, and the same key is the one allowed to call
-`initialize_config`. Production plan: move the upgrade authority to a **Squads
-multisig** (ideally with its own time delay), or **make the program immutable**
-(freeze the upgrade authority) after audit. Until then, "timelocked admin" must
+`initialize_config`. Before mainnet the upgrade authority and the admin
+**must** move to a **Squads multisig** (ideally with its own time delay),
+rehearsed on devnet first (§9.6); after audit the program may also be made
+immutable (freeze the upgrade authority). Until then, "timelocked admin" must
 always be stated together with "single-key upgrade authority".
 
 ### 3.7 Future compliance layer (talking point, not v1)
@@ -760,9 +772,11 @@ Aligned on both chains:
   `ZeroSellerProceeds()` on EVM (`settle`, `openDeal`);
 - **fee cap 0.5%** (business rule, §3.4): `fee_bps ≤ 50` on both chains. Solana:
   `MAX_FEE_BPS = 50`; EVM: `NiaraSettlement.MAX_FEE_BPS = 50`;
-- **cashback share at deployment: 2000 bps** (20% of the fee) on both chains. EVM sets
-  it in the `CashbackDistributor` constructor; Solana in `initialize_config`
-  (the `scripts/setup.ts` default);
+- **starting cashback rate**: both chains deploy at 2000 bps (20% of the trading fee).
+  Solana sets `cashback_bps` in `initialize_config` (the `scripts/setup.ts` default),
+  EVM in the `CashbackDistributor` constructor (the `script/Deploy.s.sol` default). On
+  both, later changes go through the timelock (`propose_change(CashbackBps)` /
+  `proposeSetCashbackBps`);
 - **P2P escrow** (§3.5; EVM `P2PEscrow`): the same asset classes
   (`FixedIncome`/`Credit`/`Currency`, never `Equity`); a named counterparty (no open
   offers); expiry at most 30 days ahead; `fee_bps` and `cashback_bps` snapshotted on the
@@ -882,10 +896,11 @@ settle, Solana P2P escrow, issuer cashback, honest labeling.
 
 ---
 
-## 9. Roadmap — security and token lifecycle
+## 9. Roadmap — security, token lifecycle and FX
 
-Not in v1 unless marked done. Ordered by what an incident would need first:
-contain it, recover from it, prove what happened.
+Not in v1 unless marked done. §9.1 to §9.6 are ordered by what an incident
+would need first: contain it, recover from it, prove what happened. §9.7 is a
+product item.
 
 ### 9.1 Containment: "pause fast, resume slow"
 
@@ -1033,8 +1048,29 @@ listing does not stop it.
 ### 9.6 Cybersecurity program (production)
 
 **Keys.**
-- Program upgrade authority and `admin` in a **Squads multisig** (ideally
-  with its own time delay), or the program made immutable after audit (§3.6).
+- **Migration to a multisig is mandatory before mainnet, on every chain.** No
+  mainnet deployment goes live while a single key holds the admin or the
+  program upgrade authority (Solana), or the admin, pause or treasury roles
+  (EVM).
+  - **Solana:** the program upgrade authority and `Config.admin` go to a
+    **Squads v4** vault (ideally with its own time lock). The upgrade
+    authority moves with `solana program set-upgrade-authority` (to a PDA,
+    so with `--skip-new-upgrade-authority-signer-check`). The admin moves
+    with the two-step transfer, `propose_change(Admin)` then `accept_admin`
+    signed by the vault (§3.3). Making the program immutable after audit
+    (§3.6) is an option for the upgrade authority only, never for the admin.
+  - **EVM:** the admin, pause and treasury roles of the four contracts that
+    have roles go to a **Safe**: `DEFAULT_ADMIN_ROLE` on `ListingRegistry`,
+    `NiaraSettlement`, `CashbackDistributor` and `P2PEscrow`; `PAUSER_ROLE`
+    on `ListingRegistry` (the shared pause); `TREASURY_ROLE` on
+    `CashbackDistributor` and `P2PEscrow`. The v1 deploy script grants all
+    of them to the deployer. `AssetTokenFactory` has no roles.
+  - **Rehearsed first on testnets**: Squads v4 on Solana devnet, Safe on
+    Sepolia and Base Sepolia, including at least one full admin handover
+    signed by the multisig.
+  - The settlement operator, the listing authority and the treasury are
+    rotated by the admin through the timelock (§3.3), so a multisig admin
+    can replace a leaked operational key without that key's cooperation.
 - `GUARDIAN` (§9.1) is a separate key from `admin`, so stopping the system
   never requires the keys that can change it.
 - One settlement operator key per chain, in a **KMS/HSM**, with minimal
@@ -1087,3 +1123,20 @@ listing does not stop it.
   Register evidence is preserved.
 - Periodic penetration tests (frontend, API, infrastructure).
 - **SOC 2** for the off-chain stack, already planned for Register.
+
+### 9.7 FX for neobank services
+
+Stablecoin FX for neobank services, with stablecoins for **BRL, EUR, CHF and
+GBP**, is a separate service from securities trading.
+
+- **Securities always settle in USDT**, and this does not change: `settle`
+  takes only the fee mint as payment, and `FixedIncome` / `Credit` deals
+  require the payment leg to be the fee mint (§3.4).
+- v1's `Currency` P2P deals are the closest thing today, but every one needs
+  a USDT leg: BRL ↔ USDT works, BRL ↔ EUR is rejected (`NotFeeMint`).
+  Exchanging two non-USDT stablecoins (e.g. BRL ↔ EUR, CHF ↔ GBP) needs what
+  §3.10 lists for multi-currency payment: a price oracle to charge the fee in
+  USDT, or fees and fee vaults in each currency, plus `Currency` listings for
+  each stablecoin.
+- FX is regulated separately (in Brazil, by the BCB: Lei 14.286/2021 and the
+  VASP rules, §3.10), so it gets its own legal review before production.

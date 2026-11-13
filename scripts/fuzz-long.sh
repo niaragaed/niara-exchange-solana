@@ -7,7 +7,10 @@
 # run from another terminal with:  tail -f ~/fuzz-256.log
 #
 # This is a heavy process: run nothing else heavy (anchor build, npm install,
-# another cargo test, a local validator) while it is running.
+# another cargo test, a local validator) while it is running. It runs through
+# scripts/mem-cap.sh, like scripts/build.sh: if it grows past the cap it is
+# killed alone instead of taking the WSL session with it, and the log ends
+# with the peak memory.
 #
 # It does not build. The tests load target/deploy/niara_exchange.so, so the
 # script stops if that file is missing or older than the program sources.
@@ -39,7 +42,7 @@ stamp() { date '+%Y-%m-%d %H:%M:%S %z'; }
 
 start="$(stamp)"
 start_secs=$SECONDS
-cmd="PROPTEST_CASES=$CASES cargo test --test test_invariants -- --test-threads=1"
+cmd="PROPTEST_CASES=$CASES bash scripts/mem-cap.sh cargo test --test test_invariants -- --test-threads=1"
 {
   echo "start:   $start"
   echo "commit:  $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -49,7 +52,8 @@ cmd="PROPTEST_CASES=$CASES cargo test --test test_invariants -- --test-threads=1
 say "start: $start"
 say "log:   $LOG"
 
-PROPTEST_CASES=$CASES cargo test --test test_invariants -- --test-threads=1 >>"$LOG" 2>&1
+PROPTEST_CASES=$CASES bash scripts/mem-cap.sh \
+  cargo test --test test_invariants -- --test-threads=1 >>"$LOG" 2>&1
 status=$?
 
 end="$(stamp)"

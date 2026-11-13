@@ -5,10 +5,13 @@
 # a failed or partial build can still leave a stale `.so` / IDL from an earlier
 # run that tests would silently load. This script removes the expected
 # artifacts, runs the build, and fails unless:
-#   - `anchor build` exits 0,
 #   - the log contains no compiler error lines,
-#   - the program binary, IDL and TypeScript types exist again and are newer
-#     than the build start.
+#   - both build steps exit 0,
+#   - the program binary, IDL and TypeScript types exist again, are not empty
+#     and are newer than the build start,
+#   - the IDL and the types are not older than the program binary (they are
+#     generated after it, from the same sources).
+# A failed build leaves no IDL and no types behind.
 #
 # The build runs in two steps to stay inside the machine's memory (CLAUDE.md,
 # Machine limits):
@@ -32,17 +35,21 @@ PROGRAM=niara_exchange
 SO="target/deploy/${PROGRAM}.so"
 IDL="target/idl/${PROGRAM}.json"
 TYPES="target/types/${PROGRAM}.ts"
+# Written by Anchor next to the types; removed here so it cannot go stale.
+TYPES_ERRORS="target/types/${PROGRAM}_errors.ts"
 
 LOG="$(mktemp)"
 MARKER="$(mktemp)"
 trap 'rm -f "$LOG" "$MARKER"' EXIT
 
 fail() {
+  # Never leave a partial or mismatched IDL for the scripts to pick up.
+  rm -f "$IDL" "$TYPES" "$TYPES_ERRORS"
   echo "build check FAILED: $*" >&2
   exit 1
 }
 
-rm -f "$SO" "$IDL" "$TYPES"
+rm -f "$SO" "$IDL" "$TYPES" "$TYPES_ERRORS"
 touch "$MARKER"
 
 echo "[1/2] program binary (anchor build --no-idl)"
@@ -62,6 +69,9 @@ fi
 for artifact in "$SO" "$IDL" "$TYPES"; do
   [[ -s "$artifact" ]] || fail "$artifact is missing or empty"
   [[ "$artifact" -nt "$MARKER" ]] || fail "$artifact is older than the build start"
+done
+for artifact in "$IDL" "$TYPES"; do
+  [[ ! "$artifact" -ot "$SO" ]] || fail "$artifact is older than $SO"
 done
 
 echo "build check OK: $SO ($(stat -c %s "$SO") bytes), $IDL, $TYPES"

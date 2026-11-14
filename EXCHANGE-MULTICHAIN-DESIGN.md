@@ -158,7 +158,7 @@ interface SettlementAdapter {
 | `submit_listing(asset_class, doc_hash)` | issuer | create `Listing{Pending}` for `Equity`/`FixedIncome`/`Credit`; require `issuer == asset_mint.mint_authority` and `supply == 0`; in the same instruction move the mint authority to the `["mint_authority", asset_mint]` PDA (`set_authority` CPI signed by the issuer) (§3.12) |
 | `quote_listing(valuation, listing_fee_bps, expires_at)` | listing_authority | non-`Currency` listing `Pending` or `Quoted`: store the listing-fee quote, status `Quoted` (§3.13) |
 | `pay_listing_fee` | `listing.issuer` | listing `Quoted`, quote not expired: pay the quoted fee into the fee vault; status `Approved` (§3.13). The only way an issuer listing is first approved |
-| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending`, `Quoted` or `Approved`: create the next `IssuanceBatch{Requested}` (§3.12) |
+| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Approved` only (`ListingNotIssuable` otherwise): create the next `IssuanceBatch{Requested}` (§3.12) |
 | `approve_issuance` / `reject_issuance` | listing_authority | approve: listing `Approved`, mint the batch to the recipient via the PDA, emit `IssuanceExecuted`; reject: close the request without minting (§3.12) |
 | `burn_with_reason(amount, reason, reference)` | holder | burn own tokens of an issuer-listed asset with reason `Redemption`/`Cancellation`, emit `TokensBurned` (§3.12) |
 | `list_currency(asset_mint)` | listing_authority | create an `Approved` `Currency` listing directly (stablecoin issuers such as Circle/Tether do not submit listings; Niara curates which currencies trade); `cashback_eligible = false`. Creates no fee vault: only the fee mint has one (`init_fee_vault`) |
@@ -518,7 +518,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   sweeps are also aimed at BRL/EUR, which have no fee vault and must always
   fail), and issuance on the
   four issuer listings: `request_issuance` (incl. zero amounts, wrong
-  signers, suspended/delisted listings), `approve_issuance`/`reject_issuance`
+  signers, any listing that is not `Approved`), `approve_issuance`/`reject_issuance`
   of the oldest open batch (incl. wrong signers, non-`Approved` listings,
   paused protocol) and `burn_with_reason` (incl. overdraws). Listing fee
   (§3.13): the four trading listings are approved by quote and payment at
@@ -529,7 +529,7 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   (wrong signers, expired quotes, paused, double payment) have their
   outcome predicted exactly, as do the listing status actions, so
   `approve_listing` never approves an unpaid listing; issuance on the new
-  listings is requested while `Pending` or `Quoted` and executes only once
+  listings is refused while `Pending` or `Quoted` and succeeds only once
   paid. Invariants 1 to 13 are checked after every step (4 as `vault ==
   unwithdrawn + unswept donations`, so strict equality after every sweep; 11
   also checks the mint authority is still the program PDA; 13 also
@@ -622,8 +622,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   11. issuance: `asset_mint.supply == listing.issued − listing.burned`, i.e.
       Σ executed batches − Σ `burn_with_reason`. A holder can still burn
       directly through the token program, so on-chain this is `≤` (§3.12);
-      tests and fuzzing have no direct burns and check `==`. No batch executes
-      unless the listing is `Approved` and the protocol is not paused
+      tests and fuzzing have no direct burns and check `==`. No batch is
+      requested unless the listing is `Approved`, and none executes unless it
+      is `Approved` and the protocol is not paused
   12. fees are only ever charged in `Config.fee_mint` (USDT): no `FeeLedger`
       or fee vault exists for any other mint, every executed trade has one
       leg in the fee mint, and the party receiving that leg gets
@@ -708,7 +709,7 @@ authority again. Consequences, stated rather than hidden:
 
 | Instruction | Signer | Effect |
 |---|---|---|
-| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Pending`, `Quoted` or `Approved`; `amount > 0`, non-empty `doc_hash`, `recipient` not the default key. Creates batch `listing.next_batch_no` (`Requested`) and increments the counter. Mints nothing. Emits `IssuanceRequested` |
+| `request_issuance(amount, recipient, doc_hash)` | `listing.issuer` | listing `Approved` (`ListingNotIssuable` otherwise); `amount > 0`, non-empty `doc_hash`, `recipient` not the default key. Creates batch `listing.next_batch_no` (`Requested`) and increments the counter. Mints nothing. Emits `IssuanceRequested` |
 | `approve_issuance` | `listing_authority` | batch `Requested` and listing `Approved`; blocked while paused. Mints `amount` to a token account of the asset mint owned by `recipient` (`mint_to_checked`, signed by the mint-authority PDA); `listing.issued += amount`; batch `Executed`. Emits `IssuanceExecuted { asset_mint, batch_no, amount, recipient, doc_hash, destination }` |
 | `reject_issuance` | `listing_authority` | batch `Requested` → `Rejected`; mints nothing. Any listing status, not blocked by pause. Emits `IssuanceRejected` |
 | `burn_with_reason(amount, reason, reference)` | holder (token account owner) | non-`Currency` listing, any status; `amount > 0`, non-empty `reference`; `burn_checked` from the holder's account; `listing.burned += amount`. `reason`: `Redemption` \| `Cancellation`. Emits `TokensBurned { asset_mint, holder, holder_account, amount, reason, reference }` |
@@ -720,11 +721,17 @@ authority again. Consequences, stated rather than hidden:
 - `doc_hash` is the hash of the document that authorizes the batch (e.g. the
   corporate act approving a capital increase or a debenture series), registered
   in Niara-Register; `reference` plays the same role for a burn.
-- Batches may be requested while the listing is `Pending` or `Quoted` (the
-  initial offering can be prepared before approval) but execute only once it
-  is `Approved`, i.e. once the listing fee is paid (§3.13). A `Suspended`
-  listing keeps its requests; they execute after reinstatement or are
-  rejected. Batches charge no listing fee.
+- **Issuance rule (both chains).** No batch is requested or approved unless
+  the listing is `Approved`, i.e. the listing fee is paid (§3.13). On
+  Solana `request_issuance` refuses `Pending`, `Quoted`, `Suspended` and
+  `Delisted` listings (`ListingNotIssuable`) and `approve_issuance`
+  refuses every status but `Approved` (`ListingNotApproved`); a refused
+  request creates no batch and does not advance `next_batch_no`. The
+  initial offering therefore cannot be queued before the fee is paid. A
+  request made while `Approved` that is still open when the listing is
+  suspended or delisted stays `Requested`: it executes after
+  reinstatement, or the listing authority rejects it (`reject_issuance`
+  works in any status). Batches charge no listing fee.
 - Pause: `approve_issuance` is blocked (minting is the highest-impact action
   there is); `request_issuance`, `reject_issuance` and `burn_with_reason` are
   allowed (none pays out on the protocol's accounting; a burn only destroys

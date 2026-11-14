@@ -70,7 +70,7 @@ pub enum ExchangeError {
     NothingToSweep,
     #[msg("Asset mint must have zero supply when the listing is submitted")]
     NonZeroSupply,
-    #[msg("Issuance can only be requested while the listing is Pending, Quoted or Approved")]
+    #[msg("Issuance can only be requested while the listing is Approved")]
     ListingNotIssuable,
     #[msg("Issuance batch was already executed or rejected")]
     BatchNotRequested,

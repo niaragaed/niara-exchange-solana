@@ -1,4 +1,4 @@
-//! Niara-approved issuance (spec §3.11): `submit_listing` hands the mint
+//! Niara-approved issuance (spec §3.12): `submit_listing` hands the mint
 //! authority to a program PDA; supply only grows through issuer-requested,
 //! listing-authority-approved batches, and shrinks through `burn_with_reason`.
 //! Invariant 11: `supply == Σ executed batches − Σ burns`.
@@ -48,11 +48,15 @@ fn submitted(token_program: Pubkey, class: AssetClass) -> Issuer {
     }
 }
 
-fn approved(token_program: Pubkey) -> Issuer {
-    let mut s = submitted(token_program, AssetClass::Equity);
+fn approved_as(token_program: Pubkey, class: AssetClass) -> Issuer {
+    let mut s = submitted(token_program, class);
     let issuer = s.issuer.insecure_clone();
     s.env.approve_paid(&issuer, s.mint);
     s
+}
+
+fn approved(token_program: Pubkey) -> Issuer {
+    approved_as(token_program, AssetClass::Equity)
 }
 
 impl Issuer {
@@ -182,7 +186,7 @@ fn niara_alone_cannot_mint() {
 
 #[test]
 fn request_issuance_creates_sequential_batches() {
-    let mut s = submitted(SPL_TOKEN, AssetClass::FixedIncome);
+    let mut s = approved_as(SPL_TOKEN, AssetClass::FixedIncome);
     let now = s.env.now();
     let meta = s.request(500).unwrap();
     let e = &events::<IssuanceRequested>(&meta)[0];
@@ -212,7 +216,7 @@ fn request_issuance_creates_sequential_batches() {
 /// other number fails, so numbers cannot be skipped or reused.
 #[test]
 fn batch_numbers_cannot_be_skipped_or_reused() {
-    let mut s = submitted(SPL_TOKEN, AssetClass::Equity);
+    let mut s = approved(SPL_TOKEN);
     let issuer = s.issuer.insecure_clone();
     let holder = s.holder.pubkey();
     for batch_no in [0u64, 2, 7] {
@@ -255,28 +259,41 @@ fn only_the_listing_issuer_requests_issuance() {
     assert_eq!(s.env.listing(&s.mint).next_batch_no, 1);
 }
 
+/// Spec §3.12: no batch is requested unless the listing is `Approved`, i.e.
+/// the listing fee is paid. `Pending`, `Quoted`, `Suspended` and `Delisted`
+/// refuse, and a refusal creates no batch.
 #[test]
-fn request_issuance_only_while_pending_quoted_or_approved() {
+fn request_issuance_only_while_approved() {
     let mut s = submitted(SPL_TOKEN, AssetClass::Equity);
     let authority = s.authority.insecure_clone();
     let issuer = s.issuer.insecure_clone();
-    s.request(1).unwrap(); // Pending
+    assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable); // Pending
     s.env.ensure_fee_currency();
     s.env.quote_default(s.mint).unwrap();
-    s.request(1).unwrap(); // Quoted
+    assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable); // Quoted
+    // An expired quote is still `Quoted`: not issuable either.
+    s.env.warp_secs(40 * 24 * 3600);
+    assert_eq!(s.env.listing(&s.mint).status, ListingStatus::Quoted);
+    assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable);
+    assert!(!s.env.exists(&batch_pda(&s.mint, 1)));
+    assert_eq!(s.env.listing(&s.mint).next_batch_no, 1);
+    s.env.quote_default(s.mint).unwrap();
     s.env.pay_listing_fee(&issuer, s.mint).unwrap();
     s.request(1).unwrap(); // Approved
     s.env.suspend(&authority, s.mint).unwrap();
     assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable);
+    s.env.approve(&authority, s.mint).unwrap();
+    s.request(1).unwrap(); // reinstated
     s.env.delist(&authority, s.mint).unwrap();
     assert_custom_err(s.request(1), ExchangeError::ListingNotIssuable);
-    // Batches 1 to 3 (Pending, Quoted, Approved).
-    assert_eq!(s.env.listing(&s.mint).next_batch_no, 4);
+    // Only the two requests made while Approved exist.
+    assert_eq!(s.env.listing(&s.mint).next_batch_no, 3);
+    assert!(!s.env.exists(&batch_pda(&s.mint, 3)));
 }
 
 #[test]
 fn request_issuance_validates_its_arguments() {
-    let mut s = submitted(SPL_TOKEN, AssetClass::Equity);
+    let mut s = approved(SPL_TOKEN);
     let issuer = s.issuer.insecure_clone();
     let holder = s.holder.pubkey();
     let res = s.env.request_issuance(&issuer, s.mint, 0, holder, ISSUANCE_DOC);
@@ -339,23 +356,35 @@ fn a_batch_executes_at_most_once() {
     assert_eq!(s.supply(), 100);
 }
 
-/// Batches may be requested while the listing is `Pending` or `Quoted`, but
-/// execute only once it is `Approved`, i.e. once the listing fee is paid.
+/// Nothing executes before the listing fee is paid. A batch cannot even be
+/// requested then (`request_issuance_only_while_approved`), so `approve_issuance`
+/// is checked on a listing whose status is forced back with a batch open.
 #[test]
-fn batch_on_a_pending_listing_waits_for_approval() {
-    let mut s = submitted(SPL_TOKEN, AssetClass::Equity);
+fn approve_issuance_requires_an_approved_listing() {
+    let mut s = approved(SPL_TOKEN);
     s.request(100).unwrap();
-    assert_custom_err(s.approve_batch(1), ExchangeError::ListingNotApproved);
-    s.env.ensure_fee_currency();
-    s.env.quote_default(s.mint).unwrap();
-    assert_custom_err(s.approve_batch(1), ExchangeError::ListingNotApproved);
-    assert_eq!(s.supply(), 0);
-    let issuer = s.issuer.insecure_clone();
-    s.env.pay_listing_fee(&issuer, s.mint).unwrap();
-    s.approve_batch(1).unwrap();
-    assert_eq!(s.supply(), 100);
-    // The batch charged no second listing fee.
-    let ledger = s.env.fee_ledger(&s.env.fee_mint);
+    for status in [ListingStatus::Pending, ListingStatus::Quoted] {
+        s.env.force_listing_status(&s.mint, status);
+        assert_custom_err(s.approve_batch(1), ExchangeError::ListingNotApproved);
+        assert_eq!(s.supply(), 0);
+        assert_eq!(s.env.batch(&s.mint, 1).status, BatchStatus::Requested);
+    }
+    // Without the forcing, no batch exists to approve before payment.
+    let mut p = submitted(SPL_TOKEN, AssetClass::Equity);
+    assert_custom_err(p.request(100), ExchangeError::ListingNotIssuable);
+    assert_custom_err(p.approve_batch(1), AnchorError::AccountNotInitialized);
+    p.env.ensure_fee_currency();
+    p.env.quote_default(p.mint).unwrap();
+    assert_custom_err(p.request(100), ExchangeError::ListingNotIssuable);
+    assert_custom_err(p.approve_batch(1), AnchorError::AccountNotInitialized);
+    assert_eq!(p.supply(), 0);
+    // Once paid, the same flow works and charges no second fee.
+    let issuer = p.issuer.insecure_clone();
+    p.env.pay_listing_fee(&issuer, p.mint).unwrap();
+    p.request(100).unwrap();
+    p.approve_batch(1).unwrap();
+    assert_eq!(p.supply(), 100);
+    let ledger = p.env.fee_ledger(&p.env.fee_mint);
     assert_eq!(ledger.listing_fees_collected, LISTING_FEE);
 }
 

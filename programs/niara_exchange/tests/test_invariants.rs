@@ -45,7 +45,8 @@
 //! `pay_listing_fee` (wrong signers, expired quotes, paused, double payment)
 //! have their outcome predicted exactly, and so do the status actions, so
 //! `approve_listing` never approves an unpaid listing. Issuance requests on
-//! the new listings run while `Pending` or `Quoted` and execute only once paid.
+//! the new listings are refused while `Pending` or `Quoted` and succeed only
+//! once paid (`Approved`).
 //! `PROPTEST_CASES` overrides the number of cases (default 48).
 
 mod common;
@@ -1013,10 +1014,7 @@ impl World {
         let res = self
             .env
             .request_issuance(&signer, mint, amount, recipient, ISSUANCE_DOC);
-        let issuable = matches!(
-            before.status,
-            ListingStatus::Pending | ListingStatus::Quoted | ListingStatus::Approved
-        );
+        let issuable = before.status == ListingStatus::Approved;
         if res.is_err() {
             prop_assert!(
                 intruder || !issuable || amount == 0,

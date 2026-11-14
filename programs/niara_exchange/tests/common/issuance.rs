@@ -1,7 +1,9 @@
 //! Issuance fixtures: mint authority PDA, batches, burns.
 
 use super::*;
-use niara_exchange::{BurnReason, IssuanceBatch, Listing, BATCH_SEED, MINT_AUTHORITY_SEED};
+use niara_exchange::{
+    BurnReason, IssuanceBatch, Listing, ListingStatus, BATCH_SEED, MINT_AUTHORITY_SEED,
+};
 
 pub const ISSUANCE_DOC: [u8; 32] = [9u8; 32];
 pub const BURN_REF: [u8; 32] = [5u8; 32];
@@ -36,6 +38,21 @@ impl Env {
         let mut account = self.svm.get_account(mint).unwrap();
         account.data[36..44].copy_from_slice(&supply.to_le_bytes());
         self.svm.set_account(*mint, account).unwrap();
+    }
+
+    /// Writes `status` into the listing account, bypassing the instructions.
+    /// For states the program no longer lets a listing reach with a batch
+    /// open (e.g. `Quoted` with a `Requested` batch).
+    pub fn force_listing_status(&mut self, asset_mint: &Pubkey, status: ListingStatus) {
+        use anchor_lang::AccountSerialize;
+        let mut listing = self.listing(asset_mint);
+        listing.status = status;
+        let mut data = Vec::new();
+        listing.try_serialize(&mut data).unwrap();
+        let address = listing_pda(asset_mint);
+        let mut account = self.svm.get_account(&address).unwrap();
+        account.data[..data.len()].copy_from_slice(&data);
+        self.svm.set_account(address, account).unwrap();
     }
 
     pub fn listing(&self, asset_mint: &Pubkey) -> Listing {

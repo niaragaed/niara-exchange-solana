@@ -29,6 +29,17 @@ copies; it proposes spec edits in its reports.
 
 `Cargo.lock` is committed and must keep resolving `anchor-lang 1.2.2`.
 
+`anchor --version` prints **1.2.1** while `Anchor.toml` pins 1.2.2. This is
+known; do not re-investigate. Cause (checked 2026-11-14): `~/.cargo/bin` is the
+only Anchor directory on `PATH`, and its `anchor` is an older cargo-installed
+1.2.1 binary, so avm's shim (`~/.avm/bin/anchor`) is never reached. avm itself
+has 1.2.2 installed and current; the real binary is `~/.avm/bin/anchor-1.2.2`.
+The crates (`anchor-lang`, `anchor-spl`) are 1.2.2 through `Cargo.lock`, so the
+program and its IDL come from 1.2.2; the 1.2.1 CLI only drives `build-sbf`
+(not proven to make a difference). For commands that write on-chain, such as
+`anchor idl init`, call `~/.avm/bin/anchor-1.2.2` explicitly. Changing `PATH`
+is the user's decision.
+
 ## Build and test
 
 ```bash

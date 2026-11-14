@@ -161,11 +161,12 @@ the repository). The run cost the demo funder 0.0379 SOL.
 
 ### Refusal checks (2026-11-14)
 
-`demo.ts` checks the success paths and the balances; the on-chain refusals
-(every `require!`, authorization and pause case) are covered by the LiteSVM
-tests, not by the devnet demo. The refusals run against devnet are the script
-safety checks of `scripts/localnet-demo.sh`, each refused before any
-transaction was sent:
+`demo.ts` checks the success paths and the balances. The script safety
+checks of `scripts/localnet-demo.sh` were run against devnet first; each was
+refused before any transaction was sent. The on-chain refusals (failed
+transactions) are in the next section, from `scripts/demo-refusals.ts`; the
+full set of `require!`, authorization and pause cases stays in the LiteSVM
+tests:
 
 | Command | Refused with |
 |---|---|
@@ -177,6 +178,66 @@ transaction was sent:
 Not repeated on devnet: the "the RPC is not devnet" refusal (it needs a
 non-devnet endpoint; `localnet-demo.sh` covers it).
 
+### On-chain refusals on devnet (2026-11-14)
+
+`node scripts/demo-refusals.ts --cluster devnet` (also run by
+`scripts/localnet-demo.sh`, which rehearsed it first). Every refusal is sent
+with `skipPreflight`, so it lands on devnet as a **failed transaction**; the
+script reads each one back and asserts that the failed instruction's custom
+error code is the IDL's code for the expected error and that the logs say
+`Error Code: <Name>`. All six passed, and afterwards the new listing was still
+`Quoted`, `listing_fee_paid` was 0 and the issuer still held the fee. Explorer
+shows these transactions as failed, with the error in the logs.
+
+The script creates one new Equity listing ("Niara Refusal Test (TEST)", tREF,
+mint `C3ubJyNokfj871S64oYgb227oN9mtzzQGmUMKdjp4riV`, listing left `Quoted`,
+quote of 1,000 MockUSDT payable for 75 s), because every demo listing is
+already `Approved`. The zero `match_id` case reuses the demo's flow-a listing
+([`9rhuxTmrjRDcqHBVtpBpkQku43RNf4PWibFKeTciU7eX`](https://explorer.solana.com/address/9rhuxTmrjRDcqHBVtpBpkQku43RNf4PWibFKeTciU7eX?cluster=devnet),
+Approved) with its seller, buyer and accounts. The pause case runs first, while
+the quote is fresh, so `Paused` is the only thing wrong with the payment.
+**Unpausing is not timelocked** (`unpause` is immediate, spec §3.3), so the case
+ran: `pause` and `unpause` are signed by the deployer (the admin), in a
+`finally` that always unpauses, and the script refuses to start if the protocol
+is already paused. The protocol was paused for a few seconds.
+
+| Case | Refused with | Transaction (failed) |
+|---|---|---|
+| pay_listing_fee while paused | `Paused (6009)` | [`65kEenzzBTBgUqpsC1ZmFw4DxVMeBGx7VqXW7z3J7i8zdAGbhRnTGu7fkTdWQ26x4FmCGjBzroQRdWKvRWkfBV11`](https://explorer.solana.com/tx/65kEenzzBTBgUqpsC1ZmFw4DxVMeBGx7VqXW7z3J7i8zdAGbhRnTGu7fkTdWQ26x4FmCGjBzroQRdWKvRWkfBV11?cluster=devnet) |
+| approve_listing on a Quoted listing: it only reinstates, it never approves an unpaid listing | `ListingFeeNotPaid (6059)` | [`2yRPvfs8EZciX4qN6g2XvyjgxQS4e1c5pA5q4zsdsezKbNRVj1Nw7GiRUe4LMd9Hnh9ZZLCtWTFEAud9waTKXu7D`](https://explorer.solana.com/tx/2yRPvfs8EZciX4qN6g2XvyjgxQS4e1c5pA5q4zsdsezKbNRVj1Nw7GiRUe4LMd9Hnh9ZZLCtWTFEAud9waTKXu7D?cluster=devnet) |
+| request_issuance on a Quoted listing: only an Approved listing takes batches | `ListingNotIssuable (6034)` | [`6MFa4ps7yokDJnsfFQ8YjkAikVTSifHxyPXR6t3ifzEn5pRhWMsxtxND831LwCiaJHGCPnxAiN2PwR29tumwKgw`](https://explorer.solana.com/tx/6MFa4ps7yokDJnsfFQ8YjkAikVTSifHxyPXR6t3ifzEn5pRhWMsxtxND831LwCiaJHGCPnxAiN2PwR29tumwKgw?cluster=devnet) |
+| settle on a listing that is Quoted, not Approved (valid accounts, non-zero match_id) | `ListingNotApproved (6022)` | [`4RAdgbFzMDinoKw6MCtXoyxSTiZwQAC1eoDMUbN7jW3c5CmtditPehWcnuWWEfVT4i9PyZpnom4T3rJLsNvC6sF3`](https://explorer.solana.com/tx/4RAdgbFzMDinoKw6MCtXoyxSTiZwQAC1eoDMUbN7jW3c5CmtditPehWcnuWWEfVT4i9PyZpnom4T3rJLsNvC6sF3?cluster=devnet) |
+| settle with a zero match_id | `ZeroMatchId (6051)` | [`Jt3UZVVQ81TqV3VKvkTsH1V91RGZu4ZmneRu3CWt2gCN9WFBvSYu3zy1DmAWgjJYtRKJYJJn6mG1RseY1vY5ep6`](https://explorer.solana.com/tx/Jt3UZVVQ81TqV3VKvkTsH1V91RGZu4ZmneRu3CWt2gCN9WFBvSYu3zy1DmAWgjJYtRKJYJJn6mG1RseY1vY5ep6?cluster=devnet) |
+| pay_listing_fee after the quote expired | `QuoteExpired (6058)` | [`2NL6YmTdpn6JPybc9rvM4pEbKiFaBBiGmrm8U6arbdRVeEgAktrG3KFoWCUQRTjxCtAytHnooGxFzjVNBq2Rb7b6`](https://explorer.solana.com/tx/2NL6YmTdpn6JPybc9rvM4pEbKiFaBBiGmrm8U6arbdRVeEgAktrG3KFoWCUQRTjxCtAytHnooGxFzjVNBq2Rb7b6?cluster=devnet) |
+
+Setup, pause and clean-up transactions of the same run (all succeeded):
+
+| Step | Transaction |
+|---|---|
+| fund issuer (0.0300 SOL) | [`2DWiwV1G6QctTrZGuryK9LhmKvRWBoSDSCw6jg9j1gxM4PRxfczexcR2BYss2y8yRJmtdte4XzfdYFxBrwi9mZRL`](https://explorer.solana.com/tx/2DWiwV1G6QctTrZGuryK9LhmKvRWBoSDSCw6jg9j1gxM4PRxfczexcR2BYss2y8yRJmtdte4XzfdYFxBrwi9mZRL?cluster=devnet) |
+| [s.1] issuer creates the mint "Niara Refusal Test (TEST)" (tREF) C3ubJyNokfj871S64oYgb227oN9mtzzQGmUMKdjp4riV | [`4hbu6HBhGfPbNrL4x2KmhkkP8fq4upKRc3VzTj91J9qMqkU38PCVPTvqJ6LyKgr1kvCbevZaHrLxxJgjYZUwV9tu`](https://explorer.solana.com/tx/4hbu6HBhGfPbNrL4x2KmhkkP8fq4upKRc3VzTj91J9qMqkU38PCVPTvqJ6LyKgr1kvCbevZaHrLxxJgjYZUwV9tu?cluster=devnet) |
+| [s.2] submit_listing (equity): the mint authority moves to the program | [`42evSoKsPzy9jZqb9iZahQZEVqx62ivdss6ZBW1Zi7Rb7epFX9s6Cp6FwTsaHsJwtRhi2GBjo6ZT5eV4iRjL8eu9`](https://explorer.solana.com/tx/42evSoKsPzy9jZqb9iZahQZEVqx62ivdss6ZBW1Zi7Rb7epFX9s6Cp6FwTsaHsJwtRhi2GBjo6ZT5eV4iRjL8eu9?cluster=devnet) |
+| [s.3] quote_listing: 1000.000000 mockUSDT, payable for 75 s | [`4cKJBJyoybZE5YCDHiFb1qCNvMegFzv4jhBmaHqfABeqvajesvdWD8jTgDw58x97p69jyw2eZBPwiPLGMNGDbxWG`](https://explorer.solana.com/tx/4cKJBJyoybZE5YCDHiFb1qCNvMegFzv4jhBmaHqfABeqvajesvdWD8jTgDw58x97p69jyw2eZBPwiPLGMNGDbxWG?cluster=devnet) |
+| [s.4] token accounts; Niara mints the quoted fee (test currency) to the issuer, so a refusal is never about funds | [`3GBZxY4qkxjUgbqTAKnMRd7HDpG7Y1dWMDKSJ8geDo3Geo568RudXAeie6d9y157FiPUDZYrRRXmQ1VpmKiLGtFA`](https://explorer.solana.com/tx/3GBZxY4qkxjUgbqTAKnMRd7HDpG7Y1dWMDKSJ8geDo3Geo568RudXAeie6d9y157FiPUDZYrRRXmQ1VpmKiLGtFA?cluster=devnet) |
+| [s.5] init_cashback_ledger (permissionless; settle needs it to exist) | [`PCNkLf5LXnVbRrTR7r6chFUezQxVQDK4tVddW8pQEB3Gk1BZV1Mw9RbLHmX2VE6GyUeBRihML7TiiBScYAbnXk4`](https://explorer.solana.com/tx/PCNkLf5LXnVbRrTR7r6chFUezQxVQDK4tVddW8pQEB3Gk1BZV1Mw9RbLHmX2VE6GyUeBRihML7TiiBScYAbnXk4?cluster=devnet) |
+| [s.6] pause (admin) | [`267iXvjbzu9qmQxTDn7Tne638DAUQn2hmUNy2PoNAdiezZiVT8PMiMomE3q4DvvidhukACE4DsNBuQPHP9CSwHqF`](https://explorer.solana.com/tx/267iXvjbzu9qmQxTDn7Tne638DAUQn2hmUNy2PoNAdiezZiVT8PMiMomE3q4DvvidhukACE4DsNBuQPHP9CSwHqF?cluster=devnet) |
+| [s.7] unpause (admin) | [`2SZHAbB4ESfNGAAH4ZEtTZQD7XmWq4jQZ4q5fRaikUCfUpTSNJrFTsce7PNEXjXVmFgN5peP92fVhXpi2tQtds7t`](https://explorer.solana.com/tx/2SZHAbB4ESfNGAAH4ZEtTZQD7XmWq4jQZ4q5fRaikUCfUpTSNJrFTsce7PNEXjXVmFgN5peP92fVhXpi2tQtds7t?cluster=devnet) |
+| return unused SOL to the demo funder | [`5d6xAjRbJ2U4DTVEK7SshJaFh6HZkWwXBXNdMW6qjVp1qQq8BmchXMTBKTWUebA6bmayKPEuMPxf8VfjVpgxwvxb`](https://explorer.solana.com/tx/5d6xAjRbJ2U4DTVEK7SshJaFh6HZkWwXBXNdMW6qjVp1qQq8BmchXMTBKTWUebA6bmayKPEuMPxf8VfjVpgxwvxb?cluster=devnet) |
+
+Two earlier devnet runs of the same script stopped on a bug of the script, not
+of the program: web3.js `confirmTransaction` sometimes rejects with the
+transaction error instead of returning it. Both unpaused the protocol (the
+`finally`) and returned the SOL; they left two more `Quoted` test listings
+(mint `Pn3dnfHy2WXpjiaBm2rBuun2BeP7YRghNWve1TawN2e` and
+`2Uira98mxGLTbHMZuaR2Cedcarect4NgU3Ah7h3Ad6aF`). Their transactions that
+landed: run 1 pause [`27idSWRBtyZrhDtfYR2DY63E6dLz4vPtZNMRxyRPfmbmZrefd8MxDaSnYFoJvWFrph3keGTTQRiq7Zb7J6Bf4cKw`](https://explorer.solana.com/tx/27idSWRBtyZrhDtfYR2DY63E6dLz4vPtZNMRxyRPfmbmZrefd8MxDaSnYFoJvWFrph3keGTTQRiq7Zb7J6Bf4cKw?cluster=devnet) and unpause [`5tJq4EkiHxK7t6QvJsUaztj9k2GdegTcTKaCwknTXHYbcbCF5YK8tLZbBWr1AmG1hvVURqHErYs7JmwsCr5hygXz`](https://explorer.solana.com/tx/5tJq4EkiHxK7t6QvJsUaztj9k2GdegTcTKaCwknTXHYbcbCF5YK8tLZbBWr1AmG1hvVURqHErYs7JmwsCr5hygXz?cluster=devnet) (its `pay_listing_fee` refusal landed
+with 6009 but its signature was not printed); run 2 pause [`4ipv5PxSr6pSosHdh9BedjbPTZPongBNMysoahcfk4bQktChUAZSATA8wNFK37i3eX44DkNWcTCpcCzW4RGT235h`](https://explorer.solana.com/tx/4ipv5PxSr6pSosHdh9BedjbPTZPongBNMysoahcfk4bQktChUAZSATA8wNFK37i3eX44DkNWcTCpcCzW4RGT235h?cluster=devnet), `Paused`
+refusal [`WZsJXWSzkwqDuZzxKgoAxpXc79p5Xj8M9wQJJtB6U68T1UpdLEeZEvUo9998JgyqBH7GVeh4mUYb8fDyvUuiAmC`](https://explorer.solana.com/tx/WZsJXWSzkwqDuZzxKgoAxpXc79p5Xj8M9wQJJtB6U68T1UpdLEeZEvUo9998JgyqBH7GVeh4mUYb8fDyvUuiAmC?cluster=devnet), unpause [`2pV7rKciyEjW8Lqgkz8QTpNWyZhsBaF5ygX3ut1aceXeDP5EFddvz59q97Vm5v8JU9zgxCpoveiRjJnvDttLxPVv`](https://explorer.solana.com/tx/2pV7rKciyEjW8Lqgkz8QTpNWyZhsBaF5ygX3ut1aceXeDP5EFddvz59q97Vm5v8JU9zgxCpoveiRjJnvDttLxPVv?cluster=devnet), `ListingFeeNotPaid` refusal [`GyrByNhRHA8Z6nNeD1gLrx9Ezj5Tygc2hZKdKQfActFxEE9j8EHXXCNSUS12iC4U5GBa9xQDuz8taRRfdVGSSYY`](https://explorer.solana.com/tx/GyrByNhRHA8Z6nNeD1gLrx9Ezj5Tygc2hZKdKQfActFxEE9j8EHXXCNSUS12iC4U5GBa9xQDuz8taRRfdVGSSYY?cluster=devnet) (its
+`request_issuance` refusal landed with 6034, signature not printed). The fix
+is in the script and the three runs together cost the demo funder 0.03399 SOL
+(0.16209172 → 0.12809916) and the deployer 0.00003 SOL (the six pause and
+unpause fees).
+
 ### Balances (SOL)
 
 | Account | After the upgrade, before setup | After setup, before the demo | After the demo |
@@ -187,6 +248,10 @@ non-devnet endpoint; `localnet-demo.sh` covers it).
 | Treasury | 0 (not created) | 0 | 0 |
 | Mock mint authority | 0 (not created) | 0.045154 | 0.045154 |
 | Demo funder | 0 (not created) | 0.2 | 0.16209172 |
+
+After the IDL publication and the refusal runs: deployer 7.74514706 SOL (the
+IDL cost 0.03226, six pause and unpause fees 0.00003), demo funder 0.12809916
+SOL (0.16209172 before the refusal runs).
 
 Before the upgrade the deployer held 8.28279864 SOL: upgrade and setup cost it
 0.50535696 SOL in total (0.15121 upgrade, 0.35414504 setup, of which 0.35 was

@@ -192,22 +192,44 @@ Before the upgrade the deployer held 8.28279864 SOL: upgrade and setup cost it
 0.50535696 SOL in total (0.15121 upgrade, 0.35414504 setup, of which 0.35 was
 sent to the role keys).
 
-### Publishing the IDL on-chain (not done)
+### IDL on-chain (2026-11-14)
 
-Not published. The IDL is not on chain, so Explorer shows these transactions
-as raw instructions. Mechanism: `anchor idl init --filepath
-target/idl/niara_exchange.json --provider.cluster devnet --provider.wallet
-"$DEPLOYER" "$PROGRAM_ID"` (from `anchor idl --help`: Anchor 1.x writes a
-metadata account for the program, "canonical" unless `--non-canonical`; the
-canonical one must be signed by the program's upgrade authority, here the
-deployer; `anchor idl upgrade` replaces it, `anchor idl fetch` reads it,
-`anchor idl close` removes it and recovers the rent. None of this was run.) The IDL is
-123 124 bytes, about 12 600 bytes zlib-compressed; with an account header of about
-100 bytes (an estimate) that is about 12 700 bytes, so the rent is about
-**0.065 SOL** (`solana rent 12679`, read-only), refundable on `anchor idl close`, plus a few write transactions in
-fees. `--non-canonical` writes third-party metadata instead, which is not the
-program's own; whether Explorer decodes from it was not checked. The IDL must be re-uploaded
-after every upgrade that changes it.
+The IDL is published as the program's canonical metadata (Program Metadata
+program, seed `idl`), signed by the upgrade authority (the deployer).
+
+| Item | Value |
+|---|---|
+| IDL account | [`B2iLwVDLyh9DiHpkFT3FZTPDqLuwXSCkZaTHAHSx9BbA`](https://explorer.solana.com/address/B2iLwVDLyh9DiHpkFT3FZTPDqLuwXSCkZaTHAHSx9BbA?cluster=devnet), owner `ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S`, 6 177 bytes |
+| Content | `target/idl/niara_exchange.json` **without its `docs` fields** (41 778 bytes, 6 081 compressed, sha256 `0e3c7a987f1943fcd71bd202c54df50a4ef0a73206c8c0773178366711029462`); every other field is identical. `anchor idl fetch` returns it and it decompresses to exactly that file |
+| Cost | 0.03226 SOL from the deployer (7.77744168 → 7.74517706): 0.03203 rent, refundable with `anchor idl close`, the rest fees (including those of the failed attempts below) |
+| CLI | `~/.avm/bin/anchor-1.2.2 idl init --filepath <idl> --provider.cluster devnet --provider.wallet "$DEPLOYER" "$PROGRAM_ID"` |
+| Explorer check | **Not done from here**: Explorer decodes in the browser and this session has no browser. Open a demo transaction, for example the `pay_listing_fee` of flow a, and look for the instruction name: the result is not recorded yet |
+
+What happened, so it is not repeated blindly:
+
+- The full IDL (13 031 bytes compressed, about 13 parallel writes) failed four
+  times: `idl init` once and `idl upgrade` three times (the last one with
+  `--priority-fee 200000`). Each time the CLI printed only "The provided
+  transaction plan failed to execute", no transaction had failed on chain, and
+  the account or buffer it left behind was incomplete (7 381 and 3 554 trailing
+  zero bytes). The public devnet RPC also answered HTTP 429 to my own queries
+  in that window, so rate limiting or dropped writes is the likely cause; it
+  was not proven.
+- Each failed run left a 0.0673 SOL account (the metadata account, then one
+  buffer per `upgrade` run). `idl close` removes the metadata account; a buffer
+  is consumed with `idl write-buffer --buffer <BUFFER> --close-buffer` (it
+  works only while no metadata account exists), then `idl close`. All four were
+  recovered; nothing was left on chain (checked with `getProgramAccounts` on
+  the metadata program, filtered by size). The four failed runs cost about
+  0.0002 SOL in fees.
+- With the docs stripped (about 6 KB compressed) the CLI **still printed
+  "Failed to initialize IDL"**, but this time the data had been written
+  completely: the account holds the whole IDL, fetched back and compared. So a
+  CLI error does not mean nothing was written: check with `anchor idl fetch`
+  and `getProgramAccounts` before retrying.
+- The IDL must be re-uploaded after every upgrade that changes it
+  (`idl upgrade`, which needs the buffer rent free for the run). The published
+  copy has no `docs`; the full IDL stays in `target/idl/`.
 
 ## Conventions
 

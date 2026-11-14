@@ -591,6 +591,9 @@ in CPIs, a vetted hook program) — not just enabling the extensions.
   `Quoted`, and the treasury withdrawing listing fees (never cashback). The
   fixtures approve every issuer listing by quote and payment
   (`approve_paid`), so every suite runs with listing fees in the fee vault.
+  EVM coverage in `niara-contracts`: `test/ListingFee.t.sol` (quote and
+  payment), invariant 13 in `test/Invariant.t.sol`, and the fuzzed status
+  table in `test/ListingRegistry.t.sol`.
 - Build: `scripts/build.sh` wraps `anchor build`, deletes the `.so`/IDL first and
   fails unless fresh artifacts exist, so tests never run against a stale binary.
 - Invariants (must hold under fuzzing):
@@ -867,8 +870,8 @@ zero `doc_hash` and no issuer (`Pubkey::default()` / `address(0)`).
 | Listing path | Solana instruction → event | EVM (`ListingRegistry`) function → event |
 |---|---|---|
 | Issuer submits (`Pending`) | `submit_listing` → `ListingSubmitted { listing, asset_mint, issuer, asset_class, doc_hash }` | `submitListing` → `ListingSubmitted(token, issuer, assetClass, docHash)` |
-| Niara quotes the listing fee (`Pending`/`Quoted` → `Quoted`) | `quote_listing` → `ListingQuoted { listing, asset_mint, fee_mint, valuation, listing_fee_bps, listing_fee, expires_at }` | no counterpart yet (see the note under §4.2) |
-| An issuer listing is approved (Solana: `Quoted` → `Approved`; EVM: `Pending` → `Approved`) | `pay_listing_fee` (signed by the issuer) → `ListingFeePaid { listing, asset_mint, issuer, fee_mint, valuation, listing_fee_bps, amount }`, then `ListingApproved` | `approveListing` → `ListingApproved` |
+| Niara quotes the listing fee (`Pending`/`Quoted` → `Quoted`) | `quote_listing` → `ListingQuoted { listing, asset_mint, fee_mint, valuation, listing_fee_bps, listing_fee, expires_at }` | `quoteListing` → `ListingQuoted(token, feeToken, valuation, listingFeeBps, listingFee, expiresAt)` |
+| An issuer listing is approved (`Quoted` → `Approved` on both chains) | `pay_listing_fee` (signed by the issuer) → `ListingFeePaid { listing, asset_mint, issuer, fee_mint, valuation, listing_fee_bps, amount }`, then `ListingApproved` | `payListingFee` (signed by the issuer) → `ListingFeePaid(token, issuer, feeToken, valuation, listingFeeBps, amount)`, then `ListingApproved` |
 | Niara lists a currency (created `Approved`) | `list_currency` → `ListingApproved` | `listCurrency` → `ListingApproved` |
 | Reinstatement (`Suspended` → `Approved`, any class) | `approve_listing` → `ListingApproved` (new `approved_at`) | `approveListing` → `ListingApproved` (new `approvedAt`) |
 | Suspension (`Approved` → `Suspended`) | `suspend_listing` → `ListingSuspended { listing, asset_mint }` | `suspendListing` → `ListingSuspended(token)` |
@@ -883,9 +886,8 @@ account, so `token` plays the role of both `listing` and `asset_mint`).
 ### 4.2 EVM vs Solana differences (intentional)
 
 Aligned on both chains:
-- asset classes, listing status table (except `Quoted`, Solana only until the
-  EVM listing fee lands, see the note after the table below), `ListingApproved`
-  on both listing paths (§4.1);
+- asset classes, listing status table, `ListingApproved` on both listing
+  paths (§4.1);
 - issuance batches numbered from 1 with `requested_at`/`resolved_at`, `reject_issuance`
   in any listing status, `approve_issuance` blocked while paused, non-zero `doc_hash` /
   burn `reference`;
@@ -938,7 +940,7 @@ What still differs, on purpose:
 | Asset token origin | Issuer creates the mint; `submit_listing` checks `supply == 0` and moves the mint authority to the program PDA | Issuer deploys through `AssetTokenFactory`; the token's only minter is the `ListingRegistry` from birth (no hand-over, no "finish metadata first" step) | An EVM token's code is fixed at deploy, so a factory gives a known implementation; on Solana the issuer's mint must be accepted and checked |
 | Asset-side safety check | Mint extension allowlist + no freeze authority, at listing and again in `settle` | Only factory tokens can be submitted (plain ERC-20: no fees, rebasing, hooks, pause) | Same goal (known token behavior), enforced by the implementation instead of by inspecting the mint |
 | Listing class and `doc_hash` | Arguments of `submit_listing` | Fixed at `createAssetToken`; `submitListing(token)` copies them from the token | Listing can never disagree with the instrument |
-| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess` and `approve_issuance` together; `cancel_deal`/`expire_deal` never read it | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance`, and `NiaraSettlement.settle`, both `CashbackDistributor` withdrawals and `P2PEscrow.openDeal`/`acceptDeal`/`sweepExcess` read it (`ProtocolPausable`, `EnforcedPause()`); those contracts have no pause of their own, and `cancelDeal`/`expireDeal` never read it. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
+| Where the pause lives | One `Config.paused`, set by `admin`; stops `settle`, `open_deal`/`accept_deal`, withdrawals, `sweep_excess`, `approve_issuance` and `pay_listing_fee` together; `cancel_deal`/`expire_deal` never read it | One pause too, held by `ListingRegistry` (`pause`/`unpause`, `PAUSER_ROLE` = admin); stops `approveIssuance` and `payListingFee`, and `NiaraSettlement.settle`, both `CashbackDistributor` withdrawals and `P2PEscrow.openDeal`/`acceptDeal`/`sweepExcess` read it (`ProtocolPausable`, `EnforcedPause()`); those contracts have no pause of their own, and `cancelDeal`/`expireDeal` never read it. `BackingGateway`/`AssetToken` (backed model, no Solana counterpart) keep theirs | EVM has no `Config` account; the registry is the contract every other one already reads. Same scope and same principle |
 | Admin transfer | Two steps (§3.3): the admin calls `propose_change(Admin)`, then, once the timelock has elapsed, the new admin signs `accept_admin`; until then the outgoing admin can `cancel_change` | A timelocked grant of the roles to the Safe, then a revocation of the old key's roles that the Safe proposes and executes. That Safe-signed revocation is the acceptance; until it executes, the old key can cancel it (§9.6, tested in `test/MultisigHandover.t.sol`) | Solana has one `Config.admin` field, so the new key must accept before it replaces the old one. `AccessControl` lets both keys hold a role at once, so the old key is removed by a transaction the Safe signs. Either way the new key proves it can sign before the old one loses control |
 | Batch and burn bookkeeping | `Listing.issued` / `Listing.burned` counters; `burn_with_reason` is a program instruction (`CurrencyNotIssued` for currencies) | No counters in the registry; supply = Σ `IssuanceExecuted` − Σ `TokensBurned`, derivable from events. `burnWithReason` lives on `NativeAssetToken` and emits `TokensBurned` there; currencies simply don't have it | On EVM the token is Niara's own code, so the burn path can live in it |
 | Invariant 11 | `supply ≤ issued − burned` on-chain (holders can burn directly through the token program) | `supply == Σ executed − Σ burned` strictly: `NativeAssetToken` has no other burn path | EVM token has no generic `burn` |
@@ -949,19 +951,13 @@ What still differs, on purpose:
 | Deal fee accounting | `accept_deal` updates the `FeeLedger` and the `CashbackLedger` itself (same program as `settle`) | `P2PEscrow` calls `CashbackDistributor.recordDealFee`, which only `ESCROW_ROLE` may call | On EVM the escrow and the distributor are separate contracts, so the distributor must restrict who can record a fee |
 | Error names | `DealExpired` (accept from `expires_at` on) | `DealHasExpired` | Name only, the condition is the same. On Solana the error shares its name with the `DealExpired` event; the EVM error has its own. `ZeroSellerProceeds` has the same name on both chains (see the fee rounding item above) |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
+| Listing-fee quote storage | The six quote fields live in the `Listing` account (§3.13), so every instruction that reads the listing reads them too | The quote is stored apart from the listing, in `ListingFeeQuote`, read with `getListingFeeQuote`; the listing read that every trade makes keeps its size | On EVM the listing read on every trade keeps its size; on Solana the quote fields are part of the `Listing` account at no extra read |
+| Listing-fee destination | `pay_listing_fee` transfers into the fee vault and adds to `FeeLedger.listing_fees_collected` | `payListingFee` pays `CashbackDistributor` (protocol balance plus `listingFeesCollected`) through `recordListingFee`, which only the registry can call | Same accounting (protocol revenue, no cashback share, §3.13). On EVM the registry and the distributor are separate contracts, so the distributor restricts who can record a fee, as for `recordDealFee` |
+| How the listing fee reaches the fee token and the distributor | One `Config` account holds `fee_mint`; the program reads it directly and needs no link | The registry reaches the fee token and the distributor through a timelocked link to `NiaraSettlement` | On EVM the fee token and the distributor are held by `NiaraSettlement`, not by the registry; the link is timelocked like the fee-token switch itself (§9.6 for who controls it) |
+| Listing-fee errors and types | `NotFeeMint`; the payment is checked by the mint extension allowlist; `valuation: u64`. The signer must be `listing.issuer` (`Unauthorized`), an account constraint that runs before the handler's pause check; a `Currency` listing has no issuer (`Unauthorized`) and an unlisted mint has no `Listing` account | `NotFeeToken(quoted, current)`; the payment is checked by the balance change (`TransferAmountMismatch`) instead of the mint allowlist; `valuation` is `uint256`. Paying for a `Currency` or an unlisted token fails with `NotIssuer`, and the pause is checked before the issuer | Names and widths only, plus the same pre-existing difference as for payment-side safety: ERC-20 behavior is observed, not inspected |
 | Cashback accounting and events | `Settled` carries `cashback`; per-listing `CashbackLedger`, one `FeeLedger` for the fee mint, `sweep_excess` | `Settled` has no cashback; `CashbackDistributor` emits `FeeRecorded` / `CashbackCredited`; balances are kept per (asset, token) and per token, so only USDT ever accrues, and a fee-token switch leaves old balances withdrawable; no ledger accounts, no sweep | Pre-existing EVM distributor; `settle` alone enforces the fee token |
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
-
-**Not yet aligned: the listing fee.** On Solana the listing fee is charged
-on-chain and paying it approves an issuer listing (`quote_listing`, then
-`pay_listing_fee`, §3.13); `approve_listing` only reinstates. The EVM
-`ListingRegistry` has no quote or payment step yet: `approveListing`
-approves a `Pending` listing directly, and the listing fee is still charged
-off-chain there. This is not an intentional difference; bringing the same
-flow to `ListingRegistry` (quote with the 1% cap and a 30-day expiry, payment
-in `feeToken` into the protocol's revenue with no cashback share, and
-`approveListing` limited to reinstatement) is an EVM work item.
 
 ---
 
@@ -1032,6 +1028,9 @@ settle, Solana P2P escrow, issuer cashback, honest labeling.
 
 - Explorer links already confirmed (Solana Explorer devnet, Etherscan, Basescan) —
   never depend on a live transaction during the call.
+- In the demo flow `ListingFeePaid` is emitted on both chains: by
+  `pay_listing_fee` on Solana and `payListingFee` on EVM, each followed by
+  `ListingApproved` (§4.1).
 - Short recorded video of the full flow on Solana.
 - One slide per question they will ask: why matching is off-chain; how atomic
   settlement maps to Solana's account model; why SPL delegate vs. escrow; how
@@ -1210,7 +1209,10 @@ listing does not stop it.
     that have roles go to a **Safe**: `DEFAULT_ADMIN_ROLE` on
     `ListingRegistry`, `NiaraSettlement`, `CashbackDistributor` and
     `P2PEscrow`; `PAUSER_ROLE` on `ListingRegistry` (the shared pause);
-    `TREASURY_ROLE` on `CashbackDistributor` and `P2PEscrow`. The v1 deploy
+    `TREASURY_ROLE` on `CashbackDistributor` and `P2PEscrow`. The registry's
+    `DEFAULT_ADMIN_ROLE`, which moves to the Safe, also controls the
+    timelocked link from the registry to `NiaraSettlement` that the listing
+    fee uses (§4.2); this adds no Safe role. The v1 deploy
     script grants all of them to the deployer. `AssetTokenFactory` has no
     roles. The backed-model `BackingGateway` and `AssetToken` (§1) have
     roles too, but they are not part of v1.

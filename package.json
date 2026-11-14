@@ -10,6 +10,7 @@
   "scripts": {
     "setup": "node scripts/setup.ts",
     "demo": "node scripts/demo.ts",
+    "demo-refusals": "node scripts/demo-refusals.ts",
     "localnet": "bash scripts/localnet-demo.sh",
     "typecheck": "tsc --noEmit"
   },

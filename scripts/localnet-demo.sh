@@ -7,6 +7,8 @@
 # initialize_config requires), then runs:
 #   scripts/setup.ts   (twice: the second run must find everything in place)
 #   scripts/demo.ts    (flows a, b and c)
+#   scripts/demo-refusals.ts (six on-chain refusals, each asserted by its exact
+#                       Anchor error; takes about 2 minutes: it waits for a quote to expire)
 #   the safety checks  (wrong cluster, wrong deployer and a keys folder inside
 #                       the repository must all be refused)
 # and stops the validator. The ledger and every key live in a temporary folder
@@ -94,6 +96,9 @@ node scripts/setup.ts --cluster localnet
 echo
 echo "##### demo #####"
 node scripts/demo.ts --cluster localnet "$@"
+echo
+echo "##### on-chain refusals #####"
+node scripts/demo-refusals.ts --cluster localnet
 
 echo
 echo "##### safety checks (each command below must be refused) #####"

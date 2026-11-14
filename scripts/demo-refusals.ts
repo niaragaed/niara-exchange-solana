@@ -105,17 +105,40 @@ async function sendRefused(
   const entry = ctx.program.idl.errors?.find((error) => error.name.toLowerCase() === expected.toLowerCase());
   if (!entry) throw new Error(`the IDL has no error named ${expected}`);
 
-  const { blockhash, lastValidBlockHeight } = await ctx.connection.getLatestBlockhash("confirmed");
+  // The web3.js calls can reject with a bare object (not an Error): say which stage did.
+  const stage = async <T>(name: string, run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (error) {
+      throw new Error(`"${label}": ${name} failed: ${error instanceof Error ? error.message : JSON.stringify(error)}`, { cause: error });
+    }
+  };
+  const { blockhash, lastValidBlockHeight } = await stage("getLatestBlockhash", () => ctx.connection.getLatestBlockhash("confirmed"));
   const transaction = new Transaction({ feePayer: payer.publicKey, blockhash, lastValidBlockHeight }).add(...instructions);
   transaction.sign(payer, ...cosigners.filter((signer) => !signer.publicKey.equals(payer.publicKey)));
-  const signature = await ctx.connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true });
-  const confirmation = await ctx.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+  const signature = await stage("sendRawTransaction", () =>
+    ctx.connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true }),
+  );
+  // confirmTransaction either returns the transaction error in `value.err` or
+  // rejects with that error (a bare object), depending on which of the websocket
+  // and the polling path wins. Both mean the transaction landed and failed; the
+  // read-back below checks how.
+  const landedWith = await stage("confirmTransaction", async () => {
+    try {
+      return (await ctx.connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed")).value.err;
+    } catch (error) {
+      if (typeof error === "object" && error !== null && !(error instanceof Error) && "InstructionError" in error) return error;
+      throw error;
+    }
+  });
   console.log(`  ${label}\n      ${explorerTx(ctx, signature)}`);
-  if (confirmation.value.err === null) throw new Error(`check failed: "${label}" succeeded, it must be refused`);
+  if (landedWith === null) throw new Error(`check failed: "${label}" succeeded, it must be refused`);
 
-  const fetched = await eventually(
-    () => ctx.connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }),
-    (value) => value !== null,
+  const fetched = await stage("getTransaction", () =>
+    eventually(
+      () => ctx.connection.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 }),
+      (value) => value !== null,
+    ),
   );
   if (!fetched?.meta) throw new Error(`check failed: cannot read back ${signature}`);
   const err = fetched.meta.err as { InstructionError?: [number, { Custom?: number } | string] } | string | null;

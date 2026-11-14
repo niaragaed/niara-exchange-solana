@@ -738,7 +738,8 @@ authority again. Consequences, stated rather than hidden:
 - Pause: `approve_issuance` is blocked (minting is the highest-impact action
   there is); `request_issuance`, `reject_issuance` and `burn_with_reason` are
   allowed (none pays out on the protocol's accounting; a burn only destroys
-  the holder's own tokens).
+  the holder's own tokens). The pause also stops `pay_listing_fee`
+  (`payListingFee` on EVM, §3.13), the only path to a first approval.
 - `Currency` listings have no issuer that can sign and their mint authority is
   not the program's, so they have no issuance; `burn_with_reason` rejects them
   (`CurrencyNotIssued`).
@@ -836,7 +837,10 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
 
 - **`AssetTokenFactory`** — issuer deploys its own ERC-20 instrument from its wallet
   (`assetClass`, `docHash`, issuer = `msg.sender`).
-- **`ListingRegistry`** — `submitListing` (issuer) → `approveListing` /
+- **`ListingRegistry`** — `submitListing` (issuer) → `quoteListing`
+  (LISTING_AUTHORITY_ROLE) → `payListingFee` (issuer; the only path to a first
+  approval, §3.13); `approveListing` only reinstates a `Suspended` listing
+  (free; a `Pending` or `Quoted` one reverts `ListingFeeNotPaid`);
   `suspendListing` (LISTING_AUTHORITY_ROLE, timelocked where sensitive).
 - `NiaraSettlement.settle` **reverts unless `registry.isApproved(asset)` AND the
   listing class is `Equity`**.
@@ -949,7 +953,7 @@ What still differs, on purpose:
 | Deal identity | One `Deal` account per deal, the PDA `["deal", proposer, deal_id]`; `accept_deal`, `cancel_deal` and `expire_deal` take that account | A storage entry keyed by `dealKey = keccak256(proposer, dealId)`; `acceptDeal(dealKey)` and the refund functions take the key | Solana addresses state by account, EVM by mapping key. Both scope the id to the proposer, so two proposers can use the same `deal_id` |
 | Tokens sent to the escrow | Every exit releases the deal vault's whole balance; the excess goes with the deposit and is reported as `vault_excess` (§3.5) | Every exit moves exactly the deposit; tokens sent to the contract stay there until the treasury takes them with `sweepExcess` | A Solana token account can only be closed empty and each deal has its own vault, so the excess must leave with the deposit. On EVM one contract holds every deposit: a stray transfer blocks nothing and belongs to no deal |
 | Deal fee accounting | `accept_deal` updates the `FeeLedger` and the `CashbackLedger` itself (same program as `settle`) | `P2PEscrow` calls `CashbackDistributor.recordDealFee`, which only `ESCROW_ROLE` may call | On EVM the escrow and the distributor are separate contracts, so the distributor must restrict who can record a fee |
-| Error names | `DealExpired` (accept from `expires_at` on) | `DealHasExpired` | Name only, the condition is the same. On Solana the error shares its name with the `DealExpired` event; the EVM error has its own. `ZeroSellerProceeds` has the same name on both chains (see the fee rounding item above) |
+| Error names | `DealExpired` (accept from `expires_at` on); `ListingNotIssuable` (a batch request on a listing that is not `Approved`) | `DealHasExpired`; `IssuanceNotAllowed(token, status)` | Names only, the conditions are the same. On Solana `DealExpired` is also the name of the event; the EVM error has its own. EVM `IssuanceNotAllowed` carries the token and the status, Solana `ListingNotIssuable` carries nothing (the account is known from the transaction). Both names stay. `ZeroSellerProceeds` has the same name on both chains (see the fee rounding item above) |
 | Payment-side safety | Mint extension allowlist on the payment mint | Balance-delta check on every leg (`TransferAmountMismatch`) | ERC-20 behavior can't be inspected up front, only observed |
 | Listing-fee quote storage | The six quote fields live in the `Listing` account (§3.13), so every instruction that reads the listing reads them too | The quote is stored apart from the listing, in `ListingFeeQuote`, read with `getListingFeeQuote`; the listing read that every trade makes keeps its size | On EVM the listing read on every trade keeps its size; on Solana the quote fields are part of the `Listing` account at no extra read |
 | Listing-fee destination | `pay_listing_fee` transfers into the fee vault and adds to `FeeLedger.listing_fees_collected` | `payListingFee` pays `CashbackDistributor` (protocol balance plus `listingFeesCollected`) through `recordListingFee`, which only the registry can call | Same accounting (protocol revenue, no cashback share, §3.13). On EVM the registry and the distributor are separate contracts, so the distributor restricts who can record a fee, as for `recordDealFee` |

@@ -1,9 +1,8 @@
 # Niara Exchange — Multichain Settlement Design (v1)
 
 Status: DRAFT for design freeze · Target: Solana Foundation interview (4–6 weeks)
-Chains in scope: Solana Devnet (priority), Ethereum Sepolia, Base Sepolia
-Roadmap only (not in v1): Robinhood Chain Testnet, HyperEVM Testnet, Tempo Testnet
-(target chains: §9.9)
+Chains in scope: Solana Devnet (priority), Ethereum Sepolia, Base Sepolia,
+Robinhood Chain Testnet, HyperEVM Testnet, Tempo Testnet (target chains: §9.9)
 
 > Everything here runs on testnets with test tokens. No real assets, no real money,
 > no regulatory authorization. Every screen and doc must say so.
@@ -1400,11 +1399,13 @@ Vision, not v1 scope.
 
 Target chains: **Ethereum, Solana, Base, Hyperliquid (HyperEVM), Robinhood
 Chain and Tempo**. v1 runs on Solana Devnet, Ethereum Sepolia and Base
-Sepolia only; the other three have no v1 deployment.
+Sepolia, and on three more EVM testnets: Robinhood Chain testnet (46630),
+HyperEVM testnet (998) and Tempo testnet (42431).
 
-- HyperEVM, Robinhood Chain and Tempo would reuse the EVM contracts (§4),
-  after a per-chain check of EVM compatibility, gas model and finality, and
-  with their chain ids added to the deploy scripts' chain guards (§4).
+- Robinhood Chain, HyperEVM and Tempo reuse the EVM contracts (§4) as v1
+  EVM targets, alongside Base Sepolia. Their chain ids are in the deploy
+  scripts' chain guards (§4). Phase 1 dry runs and on-node gas measurements
+  are done on all three; **finality has not been checked** on any of them.
 - Each new chain extends the `SettlementAdapter` chain list (§2) and the
   Register indexer (§6).
 - No mainnet deployment on any chain before the gates of §9.6 (multisig,

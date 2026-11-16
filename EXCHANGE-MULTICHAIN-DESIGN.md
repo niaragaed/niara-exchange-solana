@@ -144,7 +144,7 @@ interface SettlementAdapter {
 | Mint authority | `["mint_authority", asset_mint]` | PDA that holds the mint authority of every issuer-listed asset after `submit_listing`; signs `mint_to_checked` in `approve_issuance`. Holds no data |
 | `CashbackLedger` | `["cashback", listing, fee_mint]` | `listing`, `payment_mint` (= the fee mint it was created for), `accrued: u64`, `withdrawn: u64`, `bump`. Created by the permissionless `init_cashback_ledger` for a cashback-eligible listing and the current `Config.fee_mint`, never lazily inside `settle` |
 | `FeeLedger` | `["fees", fee_mint]` | `payment_mint` (= the fee mint), `fees_collected` (gross **trading** fee: protocol share + cashback), `cashback_accrued` (Σ `CashbackLedger.accrued` in this mint), `protocol_withdrawn`, `cashback_withdrawn`, `bump`, `vault_bump`, `listing_fees_collected` (Σ listing fees paid in this mint, all protocol revenue, §3.13; appended last). **One**, for the fee mint (USDT); created with the fee vault by `init_fee_vault`. Protocol share available = `fees_collected − cashback_accrued + listing_fees_collected − protocol_withdrawn`. Makes invariants 2 and 4 checkable in one account |
-| `SettlementRecord` | `["settled", match_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00095 SOL per settlement: 9 bytes + account overhead; see §3.10 for the bitmap replacement) |
+| `SettlementRecord` | `["settled", match_id]` | `bump`. Replay guard: `settle` `init`s it, so a match id settles at most once. Never closed (closing would re-enable the id); the operator pays its rent (~0.00069596 SOL per settlement: 695,960 lamports, the measured minimum for 9 bytes, §9.12; see §3.10 for the bitmap replacement) |
 | `Deal` | `["deal", proposer, deal_id]` (`deal_id: [u8;16]`, the off-chain negotiation UUID) | `deal_id`, `proposer`, `counterparty` (named; no open offers in v1), `asset_mint`, `payment_mint`, `asset_amount`, `payment_amount`, `fee_bps`, `cashback_bps` (the config's rates at `open_deal`, charged at `accept_deal`: the fee is part of the agreed terms, §3.5), `proposer_side` (`Sell`/`Buy`), `expires_at: i64`, `status` (`Open`/`Executed`/`Cancelled`/`Expired`), `opened_at`, `resolved_at`, `bump`, `vault_bump`. Never closed: the status is the replay guard (§3.5); the proposer pays its rent |
 | Deal vault | `["deal_vault", deal]` token account of the deposited mint, authority = the `Deal` PDA | holds the proposer's deposit until accept/cancel/expiry, then closed (rent to the proposer). Created by `open_deal` after its checks (the deposited mint depends on the side). A PDA rather than an ATA, for the same reason as the fee vault: anyone can create an ATA, so it could be front-run |
 | `Vault authority` | `["vault"]` | PDA signer for fee/cashback vaults and for delegated transfers |
@@ -664,8 +664,8 @@ dependencies).
   v1 removed). Roadmap (§9.10). In Brazil, FX is regulated by the BCB (Lei 14.286/2021 and the
   VASP rules), which matters for production but not for testnet.
 - **Bitmap replay protection.** Each settlement creates a `SettlementRecord`
-  that is never closed: ~0.00095 SOL of rent per settlement (rent-exempt
-  minimum for 9 data bytes) locked forever, growing linearly with volume.
+  that is never closed: ~0.00069596 SOL of rent per settlement (the
+  rent-exempt minimum for 9 data bytes, §9.12) locked forever, growing linearly with volume.
   Roadmap: replace the per-settlement records with bitmap pages (e.g. a
   `["settled_page", page_no]` account of N bits, with the match id mapped to a
   sequence number assigned by the matching engine), so one rent-exempt account
@@ -1524,14 +1524,14 @@ if the program is closed. The EVM deployments are the small remainder.
 - **Solana:** the fee is small, but each `["settled", match_id]` record
   (`SettlementRecord`, §3.2) keeps rent locked. Its size is 9 bytes: the
   8-byte Anchor discriminator plus the 1-byte `bump` (`8 +
-  SettlementRecord::INIT_SPACE` in `settle.rs`). Rent-exempt minimum is
-  (128 bytes of account overhead + 9) x 3,480 lamports per byte-year x 2
-  years = 953,520 lamports, **0.00095352 SOL, about $0.069 at $72.09**. The
+  SettlementRecord::INIT_SPACE` in `settle.rs`). The rent-exempt
+  minimum for 9 bytes, as `getMinimumBalanceForRentExemption(9)` returned it
+  on both mainnet-beta and devnet (queried 2026-11-15), is 695,960 lamports,
+  **0.00069596 SOL, about $0.050 at $72.09**. It is a measured value, not
+  derived from a formula, because the rent parameters have changed. The
   operator pays it on every settlement and gets nothing back, because the
   record is never closed (§3.2). It grows linearly with volume: 1,000,000
-  settlements lock about 953 SOL. (The rent constants are Solana's standard
-  rent parameters; confirm them with `solana rent 9` before relying on the
-  figure.)
+  settlements lock about 696 SOL. Requery before relying on the figure.
 
 **Design items, both to settle before any mainnet.**
 

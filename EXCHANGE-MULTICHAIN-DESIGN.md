@@ -974,8 +974,8 @@ deploy scripts accept exactly these five chain ids (§4). Testnets only.
 
 | Network | Chain ID | `--rpc-url` alias (`.env` variable) | RPC | Gas token | Explorer |
 |---|---|---|---|---|---|
-| Ethereum Sepolia (deferred from v1, §9.9) | 11155111 | `sepolia` (`SEPOLIA_RPC_URL`) | none public: a provider URL kept in `.env` | test ETH | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
-| Base Sepolia | 84532 | `base_sepolia` (`BASE_SEPOLIA_RPC_URL`) | none public: a provider URL kept in `.env` | test ETH | [sepolia.basescan.org](https://sepolia.basescan.org) |
+| Ethereum Sepolia (deferred from v1, §9.9) | 11155111 | `sepolia` (`SEPOLIA_RPC_URL`) | `https://ethereum-sepolia-rpc.publicnode.com` (public option; a provider URL in `.env` also works) | test ETH | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
+| Base Sepolia | 84532 | `base_sepolia` (`BASE_SEPOLIA_RPC_URL`) | `https://sepolia.base.org` (official public RPC) | test ETH | [sepolia.basescan.org](https://sepolia.basescan.org) |
 | Robinhood Chain testnet | 46630 | `robinhood_testnet` (`ROBINHOOD_TESTNET_RPC_URL`) | `https://rpc.testnet.chain.robinhood.com` | test ETH | [explorer.testnet.chain.robinhood.com](https://explorer.testnet.chain.robinhood.com) |
 | HyperEVM testnet | 998 | `hyperevm_testnet` (`HYPEREVM_TESTNET_RPC_URL`) | `https://rpc.hyperliquid-testnet.xyz/evm` | test HYPE | none working (Oct 2026)¹ |
 | Tempo testnet (Moderato) | 42431 | `tempo_testnet` (`TEMPO_TESTNET_RPC_URL`) | `https://rpc.moderato.tempo.xyz` | none: fees in pathUSD | [explore.testnet.tempo.xyz](https://explore.testnet.tempo.xyz) |
@@ -984,8 +984,8 @@ deploy scripts accept exactly these five chain ids (§4). Testnets only.
 reads them live from the official RPC.
 
 A provider URL that embeds an API key (Alchemy, Infura) stays in `.env` and
-never goes in a repository or a doc; that is why Sepolia and Base Sepolia have
-no public URL here.
+never goes in a repository or a doc. `.env.example` leaves the Sepolia and
+Base Sepolia variables blank; the URLs above are public endpoints, not secrets.
 
 ### 4.4 Chain quirks (measured 2026-11-15)
 

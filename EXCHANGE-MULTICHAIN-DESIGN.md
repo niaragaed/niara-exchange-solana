@@ -969,7 +969,8 @@ What still differs, on purpose:
 
 ### 4.3 EVM networks
 
-Copied from the `niara-contracts` README (table) and `.env.example` (RPC). The
+Copied from the `niara-contracts` README (table) and `.env.example` (RPC; the
+Sepolia and Base Sepolia URLs are public endpoints added here). The
 deploy scripts accept exactly these five chain ids (§4). Testnets only.
 
 | Network | Chain ID | `--rpc-url` alias (`.env` variable) | RPC | Gas token | Explorer |
@@ -1094,7 +1095,8 @@ settle, Solana P2P escrow, issuer cashback, honest labeling.
 
 Not in v1 unless marked done. §9.1 to §9.6 are ordered by what an incident
 would need first: contain it, recover from it, prove what happened. §9.7 to
-§9.11 are product vision, not v1 scope. They claim no regulatory status:
+§9.11 are product vision, not v1 scope. §9.12 sizes what going to mainnet
+costs. They claim no regulatory status:
 Niara holds no authorization for any of these services (the testnet notice
 at the top applies), and none is offered before counsel has assessed its
 dependencies (§9.11).
@@ -1499,3 +1501,60 @@ or authorized for it.
 | Registration of card receivables | Card receivables beyond the demo; tokenized receivables anticipation (§9.7) |
 | Stablecoin payments to employees under CLT art. 463 (salary in national currency): counsel defines the allowed uses | Payroll (§9.7) |
 | Authorization as a virtual-asset service provider (VASP) | Which services need it is part of the assessment; FX (§9.7) and the wallet service (§9.8) are the first to check |
+
+### 9.12 Pre-mainnet economics
+
+Not in v1. Figures measured on the mainnets on 2026-11-15, at SOL $72.09,
+ETH $1,817 and HYPE $66.85. They move with prices; redo the measurement
+before any mainnet decision.
+
+**One-time deployment, all six chains: about $300.** About 95% of it is the
+Solana program's rent: 3.86 SOL (about $278), a deposit that is refundable
+if the program is closed. The EVM deployments are the small remainder.
+
+- **Upgrades need a temporary buffer.** Each Solana upgrade writes the new
+  binary to a buffer account first, which needs about 3.9 SOL until the
+  upgrade completes. The upgrade authority (the Squads vault, §9.6) must
+  therefore keep about 8 SOL.
+
+**Cost per `settle`.**
+
+- **Ethereum:** about 253k gas. That is about $0.07 at 0.154 gwei and about
+  $0.92 at 2 gwei (253,000 gas x gwei x ETH price).
+- **Solana:** the fee is small, but each `["settled", match_id]` record
+  (`SettlementRecord`, §3.2) keeps rent locked. Its size is 9 bytes: the
+  8-byte Anchor discriminator plus the 1-byte `bump` (`8 +
+  SettlementRecord::INIT_SPACE` in `settle.rs`). Rent-exempt minimum is
+  (128 bytes of account overhead + 9) x 3,480 lamports per byte-year x 2
+  years = 953,520 lamports, **0.00095352 SOL, about $0.069 at $72.09**. The
+  operator pays it on every settlement and gets nothing back, because the
+  record is never closed (§3.2). It grows linearly with volume: 1,000,000
+  settlements lock about 953 SOL. (The rent constants are Solana's standard
+  rent parameters; confirm them with `solana rent 9` before relying on the
+  figure.)
+
+**Design items, both to settle before any mainnet.**
+
+1. **Minimum order size per chain.** The settle cost (gas, or record rent
+   on Solana) must never exceed the fee the settlement earns. Each chain
+   gets its own minimum order size, derived from its cost per settle and the
+   fee rate, and `settle` or the matching engine rejects orders below it.
+   Gas prices move the cost (Ethereum: $0.07 to $0.92 per settle between the
+   two gas prices above), so each minimum must be revisited as prices move.
+2. **Closing old `SettlementRecord`s to reclaim rent, without reopening
+   replay.** Closing a record frees its `match_id`, so the same match could
+   be settled again. It is safe only if `settle` also rejects any match
+   older than a maximum validity window, checked on-chain: once a record is
+   older than the window, the match it guarded can no longer settle anyway,
+   so the record is no longer needed. This has two parts, in this order:
+   - The off-chain signed-order design (§3.6) must define the window: which
+     timestamp is signed in the order intent and match, the maximum age
+     allowed, and who can set or change it (through the timelock, §3.3). No
+     such window exists today.
+   - The program must enforce it in `settle`, comparing the signed
+     timestamp with the Clock. Only after that may a `close_settlement`
+     instruction exist, and only for records older than the window plus a
+     safety margin.
+
+   Until both exist, records stay never-closed, and the bitmap-page
+   alternative (§3.10) is the other way to bound the rent.

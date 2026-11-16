@@ -966,6 +966,29 @@ What still differs, on purpose:
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 
+### 4.3 Chain quirks (measured 2026-11-15)
+
+Anvil, forge's dry run and the Foundry tests charge Ethereum gas. Some of the
+chains do not, so a dry run that passes locally can still fail on-chain.
+What each v1 chain needs for phase 1 of the deploy (source: `niara-contracts`
+README, "Network quirks"):
+
+| Chain | Quirk | What phase 1 takes |
+|---|---|---|
+| Base Sepolia | none: Ethereum gas rules | the default `--gas-estimate-multiplier` (130) |
+| Robinhood Chain testnet | Arbitrum chain: Ethereum gas plus an L1 data component | `--gas-estimate-multiplier 200` |
+| HyperEVM testnet | small blocks cap a transaction at 3,000,000 gas; `ListingRegistry` needs 4.05M | big blocks for the deployer during phase 1 |
+| Tempo testnet | no native gas token: fees are paid in pathUSD; 5.0 to 6.4x Ethereum gas | `--gas-estimate-multiplier 700` |
+
+- **HyperEVM big blocks.** Big blocks (30M gas, about one a minute) are a
+  per-address HyperCore setting that the deployer switches on for phase 1 and
+  off afterwards. Phase 2 and the demo fit small blocks.
+- **Tempo fees.** Every sender pays fees in pathUSD (6 decimals), not a
+  native token; `eth_getBalance` returns a placeholder, not a balance.
+- **Robinhood.** The L1 data component follows the L1 price, which is why the
+  multiplier is 200; only the gas used is charged.
+- Ethereum Sepolia is the case no multiplier fixes (§9.9).
+
 ---
 
 ## 5. Off-chain (Supabase `niara-exchange-dev`)

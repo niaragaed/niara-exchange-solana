@@ -967,7 +967,27 @@ What still differs, on purpose:
 | Cashback withdrawal | `withdraw_cashback(amount)` to any account of the payment mint except the vault; blocked while paused and while the listing's cashback is frozen (§9.5) | `withdraw(asset, payment)` pays the whole balance to the token's `issuerWallet()`; blocked while paused and while the listing's cashback is frozen (`Listing.cashbackFrozen`, read from the registry) | Pre-existing EVM distributor's payout shape (no amount, no destination) kept |
 | Batch timestamps | `i64` Clock `unix_timestamp` | `uint64` `block.timestamp` | Type only |
 
-### 4.3 Chain quirks (measured 2026-11-15)
+### 4.3 EVM networks
+
+Copied from the `niara-contracts` README (table) and `.env.example` (RPC). The
+deploy scripts accept exactly these five chain ids (§4). Testnets only.
+
+| Network | Chain ID | `--rpc-url` alias (`.env` variable) | RPC | Gas token | Explorer |
+|---|---|---|---|---|---|
+| Ethereum Sepolia (deferred from v1, §9.9) | 11155111 | `sepolia` (`SEPOLIA_RPC_URL`) | none public: a provider URL kept in `.env` | test ETH | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
+| Base Sepolia | 84532 | `base_sepolia` (`BASE_SEPOLIA_RPC_URL`) | none public: a provider URL kept in `.env` | test ETH | [sepolia.basescan.org](https://sepolia.basescan.org) |
+| Robinhood Chain testnet | 46630 | `robinhood_testnet` (`ROBINHOOD_TESTNET_RPC_URL`) | `https://rpc.testnet.chain.robinhood.com` | test ETH | [explorer.testnet.chain.robinhood.com](https://explorer.testnet.chain.robinhood.com) |
+| HyperEVM testnet | 998 | `hyperevm_testnet` (`HYPEREVM_TESTNET_RPC_URL`) | `https://rpc.hyperliquid-testnet.xyz/evm` | test HYPE | none working (Oct 2026)¹ |
+| Tempo testnet (Moderato) | 42431 | `tempo_testnet` (`TEMPO_TESTNET_RPC_URL`) | `https://rpc.moderato.tempo.xyz` | none: fees in pathUSD | [explore.testnet.tempo.xyz](https://explore.testnet.tempo.xyz) |
+
+¹ Niara Register links HyperEVM testnet transactions to a page of its site that
+reads them live from the official RPC.
+
+A provider URL that embeds an API key (Alchemy, Infura) stays in `.env` and
+never goes in a repository or a doc; that is why Sepolia and Base Sepolia have
+no public URL here.
+
+### 4.4 Chain quirks (measured 2026-11-15)
 
 Anvil, forge's dry run and the Foundry tests charge Ethereum gas. Some of the
 chains do not, so a dry run that passes locally can still fail on-chain.

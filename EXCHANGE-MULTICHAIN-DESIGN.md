@@ -1713,17 +1713,27 @@ if the program is closed. The EVM deployments are the small remainder.
 2. **Closing old `SettlementRecord`s to reclaim rent, without reopening
    replay.** Closing a record frees its `match_id`, so the same match could
    be settled again. It is safe only if `settle` also rejects any match
-   older than a maximum validity window, checked on-chain: once a record is
-   older than the window, the match it guarded can no longer settle anyway,
-   so the record is no longer needed. This has two parts, in this order:
-   - The off-chain signed-order design (§3.6) must define the window: which
-     timestamp is signed in the order intent and match, the maximum age
-     allowed, and who can set or change it (through the timelock, §3.3). No
-     such window exists today.
-   - The program must enforce it in `settle`, comparing the signed
-     timestamp with the Clock. Only after that may a `close_settlement`
-     instruction exist, and only for records older than the window plus a
-     safety margin.
+   whose signed validity has ended, checked on-chain: once `expires_at` has
+   passed, the match the record guarded can no longer settle anyway, so the
+   record is no longer needed. The design:
+   - **The window (defined, §3.6).** The order intent signs `expiresAt`
+     (required, unix seconds), at most **30 days** ahead. A match expires with
+     the earlier of its two intents (`Match.expiresAt`, §2). The limit is
+     **per chain** (`chains.max_intent_validity_secs`, §5); on-chain it is a
+     `Config` field changed only through the timelock (§3.3), like the other
+     parameters. Off-chain the server already enforces it at admission.
+   - **`settle` enforces it** (needs on-chain intent verification, §3.6):
+     `now < expires_at <= now + window`, comparing the signed `expires_at`
+     with the Clock.
+   - **`SettlementRecord` stores `expires_at`** (an `i64`), so it grows from 9
+     to **17 bytes**: 8-byte discriminator, 1-byte `bump`, 8-byte
+     `expires_at`. Its rent-exempt minimum becomes **736,600 lamports**
+     (0.0007366 SOL), measured with the 2026-11-15 rent parameters (the 9-byte
+     record is 695,960). Requery before relying on it.
+   - **`close_settlement`** is allowed once `now >= expires_at + margin`, and
+     **only after on-chain intent verification exists**. Until then the
+     operator supplies `expires_at` itself, so closing a record would let it
+     replay the id with a later `expires_at`: closing would reopen replay.
 
-   Until both exist, records stay never-closed, and the bitmap-page
-   alternative (§3.10) is the other way to bound the rent.
+   Until all of this exists, records stay never-closed (9 bytes, as §3.2), and
+   the bitmap-page alternative (§3.10) is the other way to bound the rent.

@@ -1707,7 +1707,14 @@ if the program is closed. The EVM deployments are the small remainder.
 1. **Minimum order size per chain.** The settle cost (gas, or record rent
    on Solana) must never exceed the fee the settlement earns. Each chain
    gets its own minimum order size, derived from its cost per settle and the
-   fee rate, and `settle` or the matching engine rejects orders below it.
+   fee rate (`chains.min_order_notional`, in USDT base units, §5). The
+   minimum is a notional (`quantity / lot_size × price`) and is checked at
+   two points, off-chain by the order service and the matching engine:
+   - **when an order is admitted**: an order below the minimum is rejected;
+   - **when a match is made**: a match below the minimum is not made. After
+     a partial fill, a remainder below the minimum is **cancelled** instead of
+     resting in the book or producing a match that costs more to settle than it
+     earns.
    Gas prices move the cost (Ethereum: $0.07 to $0.92 per settle between the
    two gas prices above), so each minimum must be revisited as prices move.
 2. **Closing old `SettlementRecord`s to reclaim rent, without reopening

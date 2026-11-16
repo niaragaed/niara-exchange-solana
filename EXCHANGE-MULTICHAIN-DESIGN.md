@@ -1065,7 +1065,7 @@ Narrative: *the Exchange operates, the Register proves it.*
 | 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Base Sepolia, then Robinhood, HyperEVM and Tempo (Sepolia deferred, §9.9) | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
 | 3 | Solana P2P escrow (`open/accept/cancel/expire_deal`); deploy program to Devnet; Supabase schema; matching engine; EVM settlement adapters | escrow invariants pass; end-to-end settle on Base Sepolia from the worker |
 | 4 | Solana settlement adapter; frontend real flow (EVM + Solana wallets) | end-to-end settle on Devnet from the UI |
-| 5 | Register indexer for 3 chains; Vercel deploy; signed order intents (if time) | Register shows real Exchange settlements |
+| 5 | Register indexer for five chains (Solana devnet, Base Sepolia, Robinhood, HyperEVM, Tempo); Vercel deploy; signed order intents (if time) | Register shows real Exchange settlements |
 | 6 | Buffer; 2-person test on 2 devices per chain; README/docs; **record the demo video** | interview package ready |
 
 Cut order if behind schedule (last to first): UI polish → signed intents

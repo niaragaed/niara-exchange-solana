@@ -830,7 +830,7 @@ with `listing_fee_bps ≤ MAX_LISTING_FEE_BPS`, and the fee ledger's
 
 ---
 
-## 4. EVM — changes to `niara-contracts` (Sepolia + Base Sepolia)
+## 4. EVM — changes to `niara-contracts` (Sepolia, Base Sepolia, Robinhood, HyperEVM, Tempo)
 
 Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
 
@@ -847,9 +847,11 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
   enum or map). `Currency` listings are created by LISTING_AUTHORITY_ROLE, never
   cashback-eligible.
 - **v1 deploy scripts, written and not broadcast yet**: two phases, with chainid
-  guards so they run on Sepolia `11155111` and Base Sepolia `84532` only,
-  keystore signers, and mock USDT / BRL test tokens as the listed currencies,
-  like `scripts/setup.ts` on Solana.
+  guards so they accept exactly Ethereum Sepolia `11155111`, Base Sepolia
+  `84532`, Robinhood Chain testnet `46630`, HyperEVM testnet `998` and Tempo
+  testnet `42431`; any other chain, mainnets included, reverts
+  `UnsupportedChain`. Keystore signers, and mock USDT / BRL test tokens as the
+  listed currencies, like `scripts/setup.ts` on Solana.
 - Same invariant fuzzing suite extended with the listing invariant.
 - **`P2PEscrow`** (EVM mirror of 3.5), **implemented**: `openDeal` (deposit),
   `acceptDeal(dealKey)` (atomic swap + fee + cashback via `CashbackDistributor`),

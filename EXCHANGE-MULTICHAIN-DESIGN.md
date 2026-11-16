@@ -1140,11 +1140,55 @@ README, "Network quirks"):
 
 ## 5. Off-chain (Supabase `niara-exchange-dev`)
 
-Minimal schema:
-- `listings(chain, asset, issuer, asset_class, status, doc_hash, tx_hash)` — mirror of on-chain state, populated by indexer
-- `orders(id, chain, asset, side, quantity, limit_price, payment_asset, wallet, intent_signature, status, created_at)`
-- `matches(id, buy_order, sell_order, quantity, price, status)`
-- `settlements(match_id, chain, tx_hash, status, error)`
+**Units.** Every quantity, price and amount is an integer in base units,
+never a float (Postgres type `base_units`: an integer `numeric` capped at
+uint256 that rejects fractions instead of rounding them).
+- `quantity`: asset base units, always a whole number of **lots**. `lot_size`
+  is an off-chain market parameter of the listing.
+- `limit_price` / `price`: USDT base units **per lot**.
+- `payment_amount = quantity / lot_size × price`, an exact integer: a fill
+  never needs rounding, so it is exactly within both limit prices. It is the
+  `payment_amount` of `settle` (§3.4); `quantity` is its `asset_amount`.
+- `lot_size` is part of the signed intent (§3.6): changing it would change what
+  a signed price means.
+
+**Tables** (migration in `niara-exchange-engine`, `supabase/migrations`;
+Postgres 17, every table has `created_at` / `updated_at`):
+- `chains(id, kind, caip2, evm_chain_id, settlement_program, quote_asset,
+  min_order_notional, max_intent_validity_secs)`: the five v1 chain ids
+  (§2), seeded. `settlement_program` and `quote_asset` (USDT) stay null until
+  deployed. `min_order_notional` is the per-chain minimum order size
+  (§9.12 item 1); `max_intent_validity_secs` the intent validity window
+  (§9.12 item 2, default 30 days).
+- `listings(chain_id, asset, issuer, asset_class, status, cashback_eligible,
+  doc_hash, asset_decimals, lot_size, tx_hash)`: mirror of on-chain state,
+  populated by the indexer; unique on (`chain_id`, `asset`).
+- `orders(id, seq, chain_id, asset, side, quantity, lot_size, limit_price,
+  payment_asset, wallet, nonce, expires_at, intent_version, intent_signature,
+  filled_quantity, status)`: one row per verified order intent (§3.6). `seq`
+  is arrival order (time priority). Unique on (`chain_id`, `wallet`, `nonce`),
+  so a signed intent enters the book once. The signed fields never change.
+- `matches(id, seq, chain_id, asset, buy_order, sell_order, maker_order,
+  quantity, lot_size, price, payment_amount, expires_at, status)`: `id` is
+  the engine's UUID v4 and the on-chain `match_id` (§3.4); no default.
+- `settlements(id, match_id, chain_id, tx_hash, status, error, attempts)`:
+  `match_id` unique, so a match is settled at most once off-chain.
+
+Status enums: orders `open`, `partially_filled`, `filled`, `cancelled`,
+`expired`, `stale` (the delegate or allowance no longer covers it, §3.5);
+matches `pending`, `settling`, `settled`, `failed`; settlements `pending`,
+`submitted`, `confirmed`, `failed`. Triggers re-check every match (sides,
+market, no self-trade, price within both limits, exact payment amount, UUID
+v4 id), keep fills monotonic and terminal statuses terminal.
+
+**Access (RLS on every table).** Anonymous users read only what the public
+order book needs: `chains`, approved `equity` and `currency` listings, and an
+aggregated `order_book` view of live orders (price levels only, never wallets,
+nonces or signatures). **Clients write nothing directly.** Orders enter
+through a server function that verifies the wallet's signature over the order
+intent (§3.6) and the chain's expiry window, then inserts with the service
+role; `matches` and `settlements` have no client access. Nobody deletes: they
+are the audit trail.
 
 Settlement worker: Node/TS service (Railway, same pattern as the Register indexer).
 - Holds **one operator key per chain**, funded with minimal test balance.

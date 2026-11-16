@@ -302,10 +302,11 @@ Known limitations, handled explicitly:
 - **One delegate per token account.** Several open orders of the same asset need
   an aggregate approval (sum of open sizes). Approving another dApp overwrites
   Niara's delegate and silently invalidates the orders.
-- **Revocable at any time.** The matching engine must check `delegate` and
-  `delegated_amount` on-chain before matching, and mark orders `stale` if the
-  check fails. `settle` re-checks on-chain anyway, so a stale order fails
-  safely (reverts, nothing moves).
+- **Revocable at any time.** The off-chain service checks `delegate` and
+  `delegated_amount` on-chain before matching and before settling, and marks
+  the order stale (`markStale`) if the check fails. The matching engine itself
+  is pure and does no I/O. `settle` re-checks on-chain anyway, so a stale
+  order fails safely (reverts, nothing moves).
 
 **P2P negotiation → per-deal escrow.** Used when two parties negotiate a
 bilateral deal (OTC / block trade / counteroffers):

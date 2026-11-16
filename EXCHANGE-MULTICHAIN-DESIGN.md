@@ -1,8 +1,9 @@
 # Niara Exchange — Multichain Settlement Design (v1)
 
 Status: DRAFT for design freeze · Target: Solana Foundation interview (4–6 weeks)
-Chains in scope: Solana Devnet (priority), Ethereum Sepolia, Base Sepolia,
-Robinhood Chain Testnet, HyperEVM Testnet, Tempo Testnet (target chains: §9.9)
+Chains in scope: Solana Devnet (priority), Base Sepolia, Robinhood Chain
+Testnet, HyperEVM Testnet, Tempo Testnet (target chains: §9.9)
+Deferred from v1: Ethereum Sepolia (contracts exceed its gas limits, §9.9)
 
 > Everything here runs on testnets with test tokens. No real assets, no real money,
 > no regulatory authorization. Every screen and doc must say so.
@@ -850,7 +851,8 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
   guards so they accept exactly Ethereum Sepolia `11155111`, Base Sepolia
   `84532`, Robinhood Chain testnet `46630`, HyperEVM testnet `998` and Tempo
   testnet `42431`; any other chain, mainnets included, reverts
-  `UnsupportedChain`. Keystore signers, and mock USDT / BRL test tokens as the
+  `UnsupportedChain`. Sepolia passes the guard but is not a v1 deployment
+  (§9.9). Keystore signers, and mock USDT / BRL test tokens as the
   listed currencies, like `scripts/setup.ts` on Solana.
 - Same invariant fuzzing suite extended with the listing invariant.
 - **`P2PEscrow`** (EVM mirror of 3.5), **implemented**: `openDeal` (deposit),
@@ -1016,8 +1018,8 @@ Narrative: *the Exchange operates, the Register proves it.*
 | Week | Deliverable | Done when |
 |---|---|---|
 | 1 | Design freeze; Anchor workspace; `Config` + `Listing` + timelock + pause; EVM `ListingRegistry` + factory | unit tests green on both stacks |
-| 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Sepolia + Base Sepolia | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
-| 3 | Solana P2P escrow (`open/accept/cancel/expire_deal`); deploy program to Devnet; Supabase schema; matching engine; EVM settlement adapters | escrow invariants pass; end-to-end settle on Sepolia from the worker |
+| 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Base Sepolia, then Robinhood, HyperEVM and Tempo (Sepolia deferred, §9.9) | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
+| 3 | Solana P2P escrow (`open/accept/cancel/expire_deal`); deploy program to Devnet; Supabase schema; matching engine; EVM settlement adapters | escrow invariants pass; end-to-end settle on Base Sepolia from the worker |
 | 4 | Solana settlement adapter; frontend real flow (EVM + Solana wallets) | end-to-end settle on Devnet from the UI |
 | 5 | Register indexer for 3 chains; Vercel deploy; signed order intents (if time) | Register shows real Exchange settlements |
 | 6 | Buffer; 2-person test on 2 devices per chain; README/docs; **record the demo video** | interview package ready |
@@ -1400,14 +1402,29 @@ Vision, not v1 scope.
 ### 9.9 Target chains
 
 Target chains: **Ethereum, Solana, Base, Hyperliquid (HyperEVM), Robinhood
-Chain and Tempo**. v1 runs on Solana Devnet, Ethereum Sepolia and Base
-Sepolia, and on three more EVM testnets: Robinhood Chain testnet (46630),
-HyperEVM testnet (998) and Tempo testnet (42431).
+Chain and Tempo**. v1 runs on Solana Devnet, Base Sepolia, and three more
+EVM testnets: Robinhood Chain testnet (46630), HyperEVM testnet (998) and
+Tempo testnet (42431). **Ethereum Sepolia is deferred from v1** (below).
 
 - Robinhood Chain, HyperEVM and Tempo reuse the EVM contracts (§4) as v1
   EVM targets, alongside Base Sepolia. Their chain ids are in the deploy
   scripts' chain guards (§4). Phase 1 dry runs and on-node gas measurements
   are done on all three; **finality has not been checked** on any of them.
+- **Ethereum Sepolia: deferred from v1 (pre-mainnet design item).** Sepolia
+  caps a transaction at 16,777,216 gas (EIP-7825) and charges about 7x more
+  for contract creation. On its prices `ListingRegistry` needs about 28.4M
+  gas and `P2PEscrow` about 19.6M, so neither fits in one transaction and no
+  gas multiplier helps. Deploying there requires splitting the contracts to
+  under about 10 KB of code each (`ListingRegistry` is 13.0 KB and also
+  creates the 4.8 KB `AssetTokenFactory`; `P2PEscrow` is 12.2 KB). That
+  split is a design decision not yet taken. The deploy scripts' chain guard
+  still accepts Sepolia (§4).
+  - Measurement, 2026-11-15: the same 10 KB contract creation costs
+    2,071,693 gas on Ethereum mainnet, Base and HyperEVM, but 15,634,968
+    gas on Sepolia (about 7.5x). Mainnet is not repriced today.
+  - Sepolia likely previews a future fork (an inference, not confirmed). If
+    that repricing reaches mainnet, splitting the contracts becomes
+    mandatory there, so it is a pre-mainnet item and not only a Sepolia one.
 - Each new chain extends the `SettlementAdapter` chain list (§2) and the
   Register indexer (§6).
 - No mainnet deployment on any chain before the gates of §9.6 (multisig,

@@ -120,6 +120,37 @@ interface SettlementAdapter {
 }
 ```
 
+`Match` is one fill produced by the matching engine (one order can be filled by
+several matches). Integers are `bigint` in TypeScript, base units, never
+floats; units as in §5 (quantity in asset base units, a whole number of lots;
+price in USDT base units per lot).
+
+```ts
+interface Match {
+  id: string;            // UUID v4: matches.id and the on-chain match_id (§3.4)
+  sequence: number;      // position in the engine's output, from 1
+  chain: ChainId;
+  asset: string;         // mint / token address
+  paymentAsset: string;  // the chain's USDT
+  buyOrderId: string;
+  sellOrderId: string;
+  buyer: string;
+  seller: string;
+  makerOrderId: string;  // the resting order: its limit price is the trade price
+  takerSide: 'buy' | 'sell';
+  quantity: bigint;      // asset base units, a multiple of lotSize
+                         //   = settle's asset_amount
+  lotSize: bigint;
+  price: bigint;         // USDT base units per lot
+  paymentAmount: bigint; // quantity / lotSize * price, exact
+                         //   = settle's payment_amount
+  expiresAt: number;     // unix seconds: the earlier of the two orders' expiries
+}
+```
+
+`settle` takes `match_id = id`, `asset_amount = quantity` and
+`payment_amount = paymentAmount`. A match never settles after `expiresAt`.
+
 ---
 
 ## 3. Solana program — `niara_exchange` (Anchor)

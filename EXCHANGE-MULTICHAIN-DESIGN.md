@@ -422,10 +422,35 @@ the Ed25519 program + instructions sysvar; EVM: EIP-712, verified with
 OpenZeppelin `ECDSA`).
 `settle` then checks the trade respects both signed intents.
 
-- v1 target: **implement if time allows (week 5)**.
-- If not implemented: state it as a **documented trust assumption** ("the
-  settlement operator is trusted to respect matched prices; signed intents are
-  the next milestone"). Never claim trustless settlement without it.
+- **Status.** Off-chain, the server already verifies every signature before an
+  order enters the book (format below). **On-chain verification is a
+  milestone scheduled after the end-to-end flow** (adapters, worker, frontend,
+  §7). Until it exists, the operator stays a **documented trust assumption**:
+  "the settlement operator is trusted to respect matched prices and to fill
+  each signed order at most once; on-chain verification of signed intents is
+  the next milestone". Never claim trustless settlement without it.
+
+**Design of the on-chain milestone.**
+- **`register_intent` (Solana).** Two verified intents do not fit in one
+  `settle` transaction: each Ed25519 instruction carries the 552-byte text, a
+  64-byte signature, a 32-byte key and 16 bytes of headers (about 664 bytes),
+  so two are about 1,330 bytes, over the 1,232-byte transaction limit before
+  `settle`'s own accounts. A `register_intent` instruction therefore verifies
+  **one** intent in **its own transaction** (Ed25519 program + instructions
+  sysvar) and creates an `["intent", wallet, nonce]` account holding the
+  intent's terms and its filled quantity. `settle` then reads the buyer's and
+  the seller's intent accounts and checks the trade against both. Registering
+  costs rent (§9.12).
+- **Cumulative fills.** Checking each match against the signed terms is not
+  enough: the operator could fill one intent several times under different
+  `match_id`s, as long as the delegate or allowance covers it (aggregate
+  approvals, §3.5, make that likely). The chain therefore tracks the
+  **cumulative filled quantity per intent** and rejects a fill that takes it
+  above the signed `quantity`: in the intent account on Solana, in a
+  `filled[intentHash]` mapping on EVM (`intentHash` = the EIP-712 digest). On
+  EVM the signature travels with the `settle` call, so no separate
+  registration is needed.
+- **Window.** `settle` also enforces the validity window of §9.12 item 2.
 
 **Program upgrade authority (applies to both modes).** Whoever holds the
 program's upgrade authority can replace the program, and with it every rule
@@ -1135,7 +1160,7 @@ Narrative: *the Exchange operates, the Register proves it.*
 | 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Base Sepolia, then Robinhood, HyperEVM and Tempo (Sepolia deferred, §9.9) | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
 | 3 | Solana P2P escrow (`open/accept/cancel/expire_deal`); deploy program to Devnet; Supabase schema; matching engine; EVM settlement adapters | escrow invariants pass; end-to-end settle on Base Sepolia from the worker |
 | 4 | Solana settlement adapter; frontend real flow (EVM + Solana wallets) | end-to-end settle on Devnet from the UI |
-| 5 | Register indexer for five chains (Solana devnet, Base Sepolia, Robinhood, HyperEVM, Tempo); Vercel deploy; signed order intents (if time) | Register shows real Exchange settlements |
+| 5 | Register indexer for five chains (Solana devnet, Base Sepolia, Robinhood, HyperEVM, Tempo); Vercel deploy; on-chain signed intents (if time) | Register shows real Exchange settlements |
 | 6 | Buffer; 2-person test on 2 devices per chain; README/docs; **record the demo video** | interview package ready |
 
 Cut order if behind schedule (last to first): UI polish → signed intents

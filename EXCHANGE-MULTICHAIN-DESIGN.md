@@ -1268,7 +1268,8 @@ listing does not stop it.
     roles. The backed-model `BackingGateway` and `AssetToken` (§1) have
     roles too, but they are not part of v1.
   - **Rehearsed first on testnets**: Squads v4 on Solana devnet, Safe on
-    Sepolia and Base Sepolia, including at least one full admin handover
+    Base Sepolia (the other EVM testnets follow if Safe supports them),
+    including at least one full admin handover
     signed by the multisig. On Solana that signature is the vault's
     `accept_admin`. The EVM handover has no on-chain acceptance step: the
     deployer grants the roles to the Safe through the timelock, then the
@@ -1285,7 +1286,7 @@ listing does not stop it.
     roles, every step waits for the timelock, and the deployer can
     `cancelAction` a pending revocation. That test runs in Foundry against
     `MockSafe`, a stand-in with no threshold, so it **does not replace** the
-    testnet rehearsal with a real Safe on Sepolia and Base Sepolia.
+    testnet rehearsal with a real Safe on Base Sepolia.
   - The settlement operator, the listing authority and the treasury are
     rotated by the admin through the timelock (§3.3), so a multisig admin
     can replace a leaked operational key without that key's cooperation.

@@ -418,7 +418,8 @@ Applies to **order-book mode only** (P2P escrow mode needs no operator).
 With delegates (and with EVM allowances), the operator can settle **within** the approved
 amounts but could, in theory, pick a worse price than the user intended. Fix:
 users sign an **order intent** (Solana: `signMessage` ed25519, verified on-chain via
-the Ed25519 program + instructions sysvar; EVM: EIP-712, verified with `ecrecover`).
+the Ed25519 program + instructions sysvar; EVM: EIP-712, verified with
+OpenZeppelin `ECDSA`).
 `settle` then checks the trade respects both signed intents.
 
 - v1 target: **implement if time allows (week 5)**.
@@ -436,6 +437,73 @@ authority is a **single key**, and the same key is the one allowed to call
 rehearsed on devnet first (§9.6); after audit the program may also be made
 immutable (freeze the upgrade authority). Until then, "timelocked admin" must
 always be stated together with "single-key upgrade authority".
+
+#### Order intent format
+
+One `OrderIntent` for both chain families. The off-chain server verifies the
+signature before an order enters the book (the only way in: clients write
+nothing to the database, §5). The format is implemented in
+`niara-exchange-engine` (`src/intents`).
+
+Signed fields, in this order:
+
+| Field | Meaning |
+|---|---|
+| `version` | `1` |
+| chain | the CAIP-2 id: `solana:<first 32 chars of the genesis hash>` (devnet: `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`) or `eip155:<chainId>` (§4.3) |
+| `settlement` | Solana: the `niara_exchange` program id. EVM: the `NiaraSettlement` address |
+| `wallet` | the signer |
+| `side` | `buy` or `sell` |
+| `asset` | asset mint / token address |
+| `quantity` | asset base units, a whole number of lots (§5) |
+| `lotSize` | asset base units per lot |
+| `limitPrice` | USDT base units per lot (§5) |
+| `paymentAsset` | the chain's USDT (§3.4) |
+| `nonce` | 16 random bytes, non-zero, unique per (chain, wallet) |
+| `expiresAt` | unix seconds, **required** (§9.12 item 2) |
+
+Amounts must fit the on-chain width: `u64` on Solana (the notional
+`quantity / lotSize × limitPrice`, which becomes `payment_amount`, too),
+`uint256` on EVM. In JSON they are decimal strings, never numbers.
+
+- **Solana**: the wallet signs, with `signMessage` (ed25519), this UTF-8 text:
+  lines joined by `\n`, no trailing newline, integers in plain decimal. The
+  testnet notice is part of what is signed. A typical message is 552 bytes.
+
+  ```
+  Niara Exchange order intent v1
+  TESTNET ONLY: no real assets, no real money.
+
+  Chain: solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+  Program: <program id>
+  Wallet: <wallet>
+  Side: buy
+  Asset: <mint>
+  Quantity: 5000000 (asset base units)
+  Lot size: 1000000 (asset base units)
+  Limit price: 25000000 (payment base units per lot)
+  Payment asset: <USDT mint>
+  Nonce: <32 lowercase hex chars>
+  Expires at: <unix seconds> (unix seconds)
+  ```
+
+  The verifier rebuilds this text from the structured intent and never parses
+  signed text, so two different intents cannot share a message. Verification
+  is strict RFC 8032 (non-canonical `S` rejected), like the Ed25519 program's
+  `verify_strict`.
+- **EVM**: EIP-712. Domain `{ name: "Niara Exchange", version: "1", chainId,
+  verifyingContract: NiaraSettlement }`. Type, with `side` 0 = buy, 1 = sell
+  (the field order is part of the type hash):
+
+  ```
+  OrderIntent(address wallet,uint8 side,address asset,uint256 quantity,
+              uint256 lotSize,uint256 limitPrice,address paymentAsset,
+              bytes16 nonce,uint64 expiresAt)
+  ```
+
+  Verified with OpenZeppelin `ECDSA` (65-byte signatures, `v` 27 or 28, low
+  `s`), not a bare `ecrecover`, which accepts a second, malleated encoding of
+  the same signature.
 
 ### 3.7 Future compliance layer (talking point, not v1)
 

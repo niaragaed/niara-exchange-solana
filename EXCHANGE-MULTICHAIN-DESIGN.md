@@ -98,11 +98,11 @@ tokenized listed stocks). v1 focuses on native issuance.
         │  (exact order amount)       │   key per chain, minimal funds)      │
         │                             └────────────┬─────────────────────────┘
         │                                          │ SettlementAdapter.settle(match)
-        │              ┌───────────────────────────┼───────────────────────────┐
-        │              ▼                           ▼                           ▼
-        │   Solana Devnet program        Ethereum Sepolia contracts    Base Sepolia contracts
-        │   (Anchor, niara_exchange)     (same Solidity as Base)       (same Solidity)
-        │              │                           │                           │
+        │              ┌───────────────────────────┴───────────────┐
+        │              ▼                                           ▼
+        │   Solana Devnet program               EVM testnets: Base Sepolia, Robinhood,
+        │   (Anchor, niara_exchange)            HyperEVM, Tempo (same Solidity, §4)
+        │              │                                           │
         └──────────────┴──────── events (ListingApproved, Settled incl. cashback)
                                                    │
                                                    ▼
@@ -113,7 +113,8 @@ Single interface on the off-chain side:
 
 ```ts
 interface SettlementAdapter {
-  chain: 'solana-devnet' | 'eth-sepolia' | 'base-sepolia';
+  chain: 'solana-devnet' | 'base-sepolia' | 'robinhood-testnet'
+       | 'hyperevm-testnet' | 'tempo-testnet';
   settle(match: Match): Promise<{ txHash: string }>;
   isListed(asset: string): Promise<boolean>;
 }
@@ -1015,7 +1016,7 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   create mint → submit listing (mint authority moves to the program) → (admin)
   quote the listing fee → issuer pays it (the listing is approved) → issuer
   requests an issuance batch → (admin) approve batch →
-  place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Sepolia / Base Sepolia.
+  place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Base Sepolia / Robinhood / HyperEVM / Tempo.
 - Deploy on **Vercel**.
 - **Niara-Register:** extend the indexer to capture `ListingApproved`
   (both listing paths, §4.1), `ListingFeePaid` (Solana), `Settled`,

@@ -1231,11 +1231,17 @@ v4 id), keep fills monotonic and terminal statuses terminal.
 **Access (RLS on every table).** Anonymous users read only what the public
 order book needs: `chains`, approved `equity` and `currency` listings, and an
 aggregated `order_book` view of live orders (price levels only, never wallets,
-nonces or signatures). **Clients write nothing directly.** Orders enter
-through a server function that verifies the wallet's signature over the order
-intent (§3.6) and the chain's expiry window, then inserts with the service
-role; `matches` and `settlements` have no client access. Nobody deletes: they
-are the audit trail.
+nonces or signatures). **Clients write nothing directly.** Orders and
+cancellations enter through the **order service**: a single-instance Node
+process (`niara-exchange-engine`, `src/service`), not a Supabase function. It
+verifies the wallet's signature over the order intent (§3.6) and the chain's
+expiry window, runs the matching engine, and writes with the service role over
+a direct Postgres connection. It holds a session-level Postgres advisory lock,
+so only one instance can match (a second one refuses to start), and the
+settlement worker runs inside the same process. The engine's in-memory books
+are rebuilt from `orders` (and the quantities in flight) on every start.
+`matches` and `settlements` have no client access. Nobody deletes: they are
+the audit trail.
 
 Settlement worker: Node/TS service (Railway, same pattern as the Register indexer).
 - Holds **one operator key per chain**, funded with minimal test balance.

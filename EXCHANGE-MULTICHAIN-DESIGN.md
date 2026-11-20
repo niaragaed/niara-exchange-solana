@@ -161,6 +161,15 @@ interface Match {
 `settle` takes `match_id = id`, `asset_amount = quantity` and
 `payment_amount = paymentAmount`. A match never settles after `expiresAt`.
 
+**Who enforces that today.** Off-chain only, until `settle` checks the signed
+window on-chain (§3.6, §9.12 item 2). Two margins protect the deadline: the
+engine does not match an order with less than `SETTLEMENT_MARGIN_SECS`
+(default 60 s) left to its expiry, and the settlement worker does not send a
+transaction within `SETTLE_DEADLINE_MARGIN_SECS` (default 90 s) of
+`expires_at`, because a sent transaction can land up to a blockhash lifetime
+later. Past that point the worker fails the match with fault `expired` (§5,
+failed matches) instead of sending it.
+
 ---
 
 ## 3. Solana program — `niara_exchange` (Anchor)
@@ -1299,6 +1308,9 @@ the audit trail.
 Settlement worker: Node/TS service (Railway, same pattern as the Register indexer).
 - Holds **one operator key per chain**, funded with minimal test balance.
 - Operator keys **never** in the frontend, never in `NEXT_PUBLIC_*`, never in git.
+- Never settles after `expires_at`: it does not send within 90 s of it
+  (`SETTLE_DEADLINE_MARGIN_SECS`, §2) and fails the match with fault `expired`
+  instead, until `settle` checks the window on-chain (§3.6).
 - Idempotent: a match is settled at most once (unique constraint on `match_id`
   off-chain; on Solana also on-chain, since `settle` takes the match UUID as
   `match_id` and creates `["settled", match_id]`).

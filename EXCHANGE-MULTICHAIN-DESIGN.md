@@ -115,10 +115,20 @@ Single interface on the off-chain side:
 interface SettlementAdapter {
   chain: 'solana-devnet' | 'base-sepolia' | 'robinhood-testnet'
        | 'hyperevm-testnet' | 'tempo-testnet';
-  settle(match: Match): Promise<{ txHash: string }>;
+  settle(match: Match): Promise<{ txHash: string; alreadySettled: boolean }>;
+  findSettlement(match: Match): Promise<string | null>;  // sends nothing
   isListed(asset: string): Promise<boolean>;
 }
 ```
+
+`alreadySettled` is true when the chain already held the match's replay guard
+(`["settled", match_id]` on Solana, §3.4): nothing was sent and `txHash` is the
+transaction that created it. `findSettlement` returns that transaction, or
+`null` if the match is not settled; the worker calls it before every send and
+after the last retry, so a transaction whose confirmation was ambiguous is
+never sent twice. A refusal by the chain throws, and the error says whether a
+retry can help (transient RPC trouble or a paused protocol) or not (a program
+error such as `DelegateNotSet`).
 
 `Match` is one fill produced by the matching engine (one order can be filled by
 several matches). Integers are `bigint` in TypeScript, base units, never

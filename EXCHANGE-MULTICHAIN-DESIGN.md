@@ -348,6 +348,29 @@ Known limitations, handled explicitly:
   the order stale (`markStale`) if the check fails. The matching engine itself
   is pure and does no I/O. `settle` re-checks on-chain anyway, so a stale
   order fails safely (reverts, nothing moves).
+- **Both legs are checked.** `settle` moves both legs through the vault PDA
+  (§3.4), so it refuses a buyer whose payment account does not delegate too
+  (`DelegateNotSet` / `InsufficientDelegation` on that leg). An order is
+  covered while its wallet's token account delegates to the vault PDA, and
+  holds, at least what `settle` would move: a **sell** order its remaining
+  asset quantity (in the asset's account); a **buy** order its maximum
+  payment in USDT, `remaining / lot_size × limit_price` (in the USDT account).
+  For a match the two needs are the match's `quantity` (seller) and
+  `payment_amount` (buyer).
+- **When the service checks.** Before matching, it checks the new order
+  (refused with `delegate_not_covered` if uncovered) and then the resting
+  orders it would cross, best first, until their covered quantity is enough:
+  uncovered resting orders are marked stale in the same transaction as the
+  placement, so the new order matches the covered ones behind them. If the
+  chain cannot be read, the order is refused (retry later) rather than matched
+  unchecked. The worker checks both legs again right before settling. The
+  pre-match check is on by default (`DELEGATE_CHECK`); `settle` is the
+  backstop either way.
+- **Aggregate delegations are not summed (known gap).** The check is per
+  order: several open orders of one wallet on one mint are each compared with
+  the whole delegation, not with their sum, so a wallet that approved one
+  amount can have more open orders than it covers; the later match that
+  `settle` refuses ends as a failed match (§5, failed matches).
 
 **P2P negotiation → per-deal escrow.** Used when two parties negotiate a
 bilateral deal (OTC / block trade / counteroffers):

@@ -315,6 +315,14 @@ Preconditions (all enforced on-chain):
 - seller's asset account `delegate == vault_authority` and `delegated_amount ≥ asset_amount`
 - buyer's payment account `delegate == vault_authority` and `delegated_amount ≥ payment_amount`
 
+**Which token accounts.** The program only requires that each account is owned
+by the right wallet and holds the right mint (above). The signed intent names
+**wallets, not token accounts** (§3.6), so the off-chain adapter uses each
+party's **associated token account** for each mint (under that mint's token
+program), and the delegate check (§3.5) looks at the same accounts. A wallet
+that approved the delegate on a non-associated account is therefore not
+covered.
+
 Math (checked, `u128` intermediates):
 ```
 fee      = ceil(payment_amount * fee_bps / 10_000)      // never zero by truncation when fee_bps > 0

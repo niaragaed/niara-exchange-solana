@@ -561,6 +561,53 @@ Amounts must fit the on-chain width: `u64` on Solana (the notional
   `s`), not a bare `ecrecover`, which accepts a second, malleated encoding of
   the same signature.
 
+#### Order cancellation
+
+A wallet cancels one of its orders with a signed `CancelIntent`, implemented
+in `niara-exchange-engine` (`src/intents/cancel.ts`). It names the order by
+chain, program/contract, wallet and the order's `nonce`. The nonce is unique per
+(chain, wallet) (§5), so it designates exactly one order, ever; a cancellation
+needs no nonce or expiry of its own, and replaying it cancels an order that is
+already cancelled.
+
+| Field | Meaning |
+|---|---|
+| `version` | `1` |
+| chain | CAIP-2 id, as in the order intent |
+| `settlement` | the same program / `NiaraSettlement` address as the order intent |
+| `wallet` | the order's wallet, and the signer |
+| `nonce` | the order intent's nonce |
+
+- **Solana**: `signMessage` over this UTF-8 text (lines joined by `\n`, no
+  trailing newline). The first line differs from the order intent's, so neither
+  text can be taken for the other. As for orders, the verifier rebuilds the text
+  and never parses signed text, and verification is strict RFC 8032.
+
+  ```
+  Niara Exchange cancel order v1
+  TESTNET ONLY: no real assets, no real money.
+
+  Chain: solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
+  Program: <program id>
+  Wallet: <wallet>
+  Order nonce: <32 lowercase hex chars>
+  ```
+- **EVM**: EIP-712, same domain as `OrderIntent`, a distinct primary type
+  (the digests cannot collide): `CancelOrder(address wallet,bytes16 nonce)`.
+
+**Enforced off-chain only.** The order service takes the order out of the book.
+That does not stop the operator from settling an intent that is already on
+chain: once an intent is registered (`["intent", wallet, nonce]` on Solana) or
+carried with `settle` (EVM), an off-chain cancellation is not seen by the
+contract. Until the on-chain milestone has its own cancel, the wallet's
+on-chain guarantee that a cancelled order never settles is **revoking the
+delegate or allowance** (§3.5).
+
+**Proposed for the on-chain milestone (not built):** a wallet-signed
+`cancel_intent` instruction that marks the intent account cancelled on Solana
+(`settle` then refuses it), and a `cancelled[wallet][nonce]` mapping set by the
+wallet on EVM (`settle` checks it, like `filled[intentHash]`).
+
 ### 3.7 Future compliance layer (talking point, not v1)
 
 Token-2022 extensions give Solana-native securities controls:

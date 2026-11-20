@@ -1231,6 +1231,15 @@ matches `pending`, `settling`, `settled`, `failed`; settlements `pending`,
 market, no self-trade, price within both limits, exact payment amount, UUID
 v4 id), keep fills monotonic and terminal statuses terminal.
 
+**Cancellation audit trail (proposed, not yet in a migration).** Today
+`orders.status = 'cancelled'` does not say who cancelled or why; the engine
+knows the reason only as an event. A later migration adds
+`orders.cancel_reason` (`by_wallet`, `self_trade_prevention`,
+`below_min_notional`, the engine's three reasons) and `orders.cancel_signature`
+(the wallet's signed cancellation, §3.6, set only for `by_wallet`), so the
+audit trail shows who cancelled and why. Both are written once, with the
+cancelled status, and never change.
+
 **Access (RLS on every table).** Anonymous users read only what the public
 order book needs: `chains`, approved `equity` and `currency` listings, and an
 aggregated `order_book` view of live orders (price levels only, never wallets,

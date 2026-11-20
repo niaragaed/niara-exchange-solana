@@ -1780,7 +1780,8 @@ if the program is closed. The EVM deployments are the small remainder.
    is the incoming order, the incoming order is cancelled and matching
    **stops**. The engine never skips the best price to reach a larger match.
    This also covers resting orders left below a minimum that was raised after
-   they were admitted. The cancellation reason is `below_min_notional` (§5).
+   they were admitted. The engine reports the cancellation with the reason `below_min_notional`
+   (§5, cancellation audit trail).
    Gas prices move the cost (Ethereum: $0.07 to $0.92 per settle between the
    two gas prices above), so each minimum must be revisited as prices move.
 2. **Closing old `SettlementRecord`s to reclaim rent, without reopening

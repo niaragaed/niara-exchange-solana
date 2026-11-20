@@ -1445,6 +1445,23 @@ settle, Solana P2P escrow, issuer cashback, honest labeling.
 - In the demo flow `ListingFeePaid` is emitted on both chains: by
   `pay_listing_fee` on Solana and `payListingFee` on EVM, each followed by
   `ListingApproved` (§4.1).
+- **First end-to-end settlement (2026-11-20, Solana devnet, test tokens
+  only).** One order-book trade went through the whole chain: two signed
+  order intents (§3.6) entered the order service, the matching engine matched
+  them, the settlement worker sent `settle` on its first attempt, and the
+  program settled it atomically. The trade was 10 tEQTY at 25 mockUSDT, so
+  `payment_amount` 250 mockUSDT. The `Settled` event reports **fee 1.25**
+  and **cashback 0.25** (to the tEQTY issuer), and the seller received
+  **248.75** mockUSDT (250 − 1.25). Settlement transaction
+  [`CqwNyj2q…8tAYy9`](https://explorer.solana.com/tx/CqwNyj2qMUwxpqGDXaeYU3VetRvUC3AKx2xj1uRUQz9ZXJ5K6ypmFwW8kJKJYw8weJeLCRVAwRmY7V5uD8tAYy9?cluster=devnet);
+  the wallets' token approvals to the vault PDA were a separate earlier
+  transaction. The run's script checked eight conditions (amounts, balances,
+  event) and all passed. Record, with both transactions, the match id and the
+  balances before and after: `docs/devnet-e2e-2026-11-20.md` in
+  `niara-exchange-engine` (commit `3776ada`; on the dev machine
+  `~/niara-exchange-engine/docs/devnet-e2e-2026-11-20.md`). Order intents
+  are verified off-chain only at this point: the operator is still a
+  trusted party (§3.6).
 - Short recorded video of the full flow on Solana.
 - One slide per question they will ask: why matching is off-chain; how atomic
   settlement maps to Solana's account model; why SPL delegate vs. escrow; how

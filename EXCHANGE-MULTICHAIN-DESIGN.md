@@ -1213,11 +1213,14 @@ Postgres 17, every table has `created_at` / `updated_at`):
 - `orders(id, seq, chain_id, asset, side, quantity, lot_size, limit_price,
   payment_asset, wallet, nonce, expires_at, intent_version, intent_signature,
   filled_quantity, status)`: one row per verified order intent (§3.6). `seq`
-  is arrival order (time priority). Unique on (`chain_id`, `wallet`, `nonce`),
+  is arrival order (time priority), assigned by the matching engine and stored
+  as is, not by the database. Unique on (`chain_id`, `wallet`, `nonce`),
   so a signed intent enters the book once. The signed fields never change.
 - `matches(id, seq, chain_id, asset, buy_order, sell_order, maker_order,
   quantity, lot_size, price, payment_amount, expires_at, status)`: `id` is
-  the engine's UUID v4 and the on-chain `match_id` (§3.4); no default.
+  the engine's UUID v4 and the on-chain `match_id` (§3.4); no default. `seq`
+  is the match's position in the engine's output (`Match.sequence`, §2),
+  stored as is.
 - `settlements(id, match_id, chain_id, tx_hash, status, error, attempts)`:
   `match_id` unique, so a match is settled at most once off-chain.
 

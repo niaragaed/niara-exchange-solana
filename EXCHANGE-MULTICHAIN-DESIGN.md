@@ -1262,7 +1262,8 @@ Postgres 17, every table has `created_at` / `updated_at`):
   populated by the indexer; unique on (`chain_id`, `asset`).
 - `orders(id, seq, chain_id, asset, side, quantity, lot_size, limit_price,
   payment_asset, wallet, nonce, expires_at, intent_version, intent_signature,
-  filled_quantity, status)`: one row per verified order intent (§3.6). `seq`
+  filled_quantity, settled_quantity, released_quantity, voided_quantity,
+  status)`: one row per verified order intent (§3.6). `seq`
   is arrival order (time priority), assigned by the matching engine and stored
   as is, not by the database. Unique on (`chain_id`, `wallet`, `nonce`),
   so a signed intent enters the book once. The signed fields never change.
@@ -1273,13 +1274,87 @@ Postgres 17, every table has `created_at` / `updated_at`):
   stored as is.
 - `settlements(id, match_id, chain_id, tx_hash, status, error, attempts)`:
   `match_id` unique, so a match is settled at most once off-chain.
+- `match_reversals(id, match_id, order_id, kind, fault, quantity, reason)`:
+  the audit trail of failed matches, one row per (failed match, order),
+  unique on that pair; see "Failed matches" below.
 
 Status enums: orders `open`, `partially_filled`, `filled`, `cancelled`,
 `expired`, `stale` (the delegate or allowance no longer covers it, §3.5);
 matches `pending`, `settling`, `settled`, `failed`; settlements `pending`,
 `submitted`, `confirmed`, `failed`. Triggers re-check every match (sides,
 market, no self-trade, price within both limits, exact payment amount, UUID
-v4 id), keep fills monotonic and terminal statuses terminal.
+v4 id), keep every quantity counter monotonic and `cancelled` / `expired`
+terminal (`filled` is not terminal, see "Failed matches").
+
+What the settlement and match statuses mean:
+- settlement `pending`: created, or waiting for a retry after a transient
+  error (the error is stored); `submitted`: handed to the chain (each send
+  counts as an attempt); `confirmed`: settled on-chain, with the transaction
+  hash; `failed`: refused or given up, with a readable error.
+- match `pending`: made, not yet attempted; `settling`: an attempt is in
+  flight (also what a crash in the middle of one leaves, and what the worker
+  resumes, always starting by asking the chain whether it already settled);
+  `settled`: confirmed on-chain; `failed`: it will not settle, and its
+  quantity has been given back or voided (below).
+
+**Failed matches.** The engine fills both orders when it makes a match;
+settlement comes later and can fail (a delegation revoked, the chain refusing,
+expiry). The quantity of a failed match is not lost: it is accounted for by
+counters and an audit trail (migration `20261120120000_match_reversals`).
+
+- **Counters on `orders`, all monotonic** (none ever decreases, enforced by a
+  trigger):
+  - `filled_quantity`: total ever matched (the meaning it always had);
+  - `settled_quantity`: matched and settled on-chain;
+  - `released_quantity`: of failed matches, given back to the order because it
+    was not at fault;
+  - `voided_quantity`: of failed matches, lost by the order because it was at
+    fault.
+
+  *Net matched* = `filled − released − voided`; *remaining* = `quantity − net
+  matched`; *in flight* = `filled − settled − released − voided`. The status
+  follows net matched (`open` at 0, `partially_filled` between, `filled` at
+  `quantity`). `filled` is therefore not terminal: it may change only in the
+  same update that releases or voids. The public `order_book` view reads the
+  net quantities.
+- **Audit trail: `match_reversals`.** One row per (failed match, order) with
+  `kind` (`released` or `voided`), `fault`, `quantity` (the match's) and a
+  `reason`. Append-only: no update or delete, for the service role too, and no
+  client access. Deferred constraint triggers check at commit that each
+  order's settled, released and voided quantities equal the sum of its settled
+  matches and its reversal rows, that a failed match has exactly one row per
+  order, of its quantity, and that a settled match has none. The worker writes
+  a settled match and both orders' `settled_quantity` in one transaction, and a
+  failed one (match, settlement, reversal rows, orders, and any new matches
+  made when an innocent order re-enters) through the order service in one
+  transaction, with the engine's exact values: a lower value
+  fails loudly instead of being kept.
+- **Fault kinds** (`match_fault`), chosen by the worker: `seller`, `buyer` or
+  `both` (the delegate check before settling found that side uncovered, or the
+  chain refused for delegation or funds and an on-chain re-check found the
+  side); `expired` (the match cannot settle before its `expires_at`, §2);
+  `none` (the chain refused for another reason, or the retries ran out after a
+  final on-chain check found it unsettled).
+- **Who gets the quantity back** (`MatchingEngine.reverse`):
+  - **at fault** (`seller`, `buyer`, `both`): the quantity is voided, and the
+    order becomes `stale`, out of the book; its wallet can still cancel it;
+  - **innocent**: the quantity is released and the order re-enters the market
+    **at its original priority** (`seq`) through the normal matching loop, so
+    the book never crosses (an order that arrived while it was out may now
+    cross it). If it is no longer live it expires; if it was already
+    cancelled, expired or stale, the release is accounting only;
+  - **`expired`**: both are released. An order whose expiry is at or before
+    the match's `expires_at` expires; the other re-enters;
+  - **`none`**: both are released but become `stale`, since re-entering they
+    would match each other again and fail the same way in a loop.
+- **Restart.** The engine's rebuild also loads `filled` orders that still have
+  quantity in flight, out of the book, so a failure after a restart can still
+  give their quantity back. The service refuses to start until the migration
+  is applied.
+- **Not done yet.** A `none` failure leaves both orders stale and nothing
+  re-offers them; a stale order never returns to the book (its wallet cancels
+  it and places a new one), although the status enum would allow
+  `stale → open`.
 
 **Cancellation audit trail (proposed, not yet in a migration).** Today
 `orders.status = 'cancelled'` does not say who cancelled or why; the engine

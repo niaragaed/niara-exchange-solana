@@ -1464,7 +1464,8 @@ are rebuilt from `orders` (and the quantities in flight) on every start.
 `matches` and `settlements` have no client access. Nobody deletes: they are
 the audit trail.
 
-Settlement worker: Node/TS service (Railway, same pattern as the Register indexer).
+Settlement worker: Node/TS service (Railway, same pattern as the Register indexer;
+it runs inside the order service, hosting in §6).
 - Holds **one operator key per chain**, funded with minimal test balance.
 - Operator keys **never** in the frontend, never in `NEXT_PUBLIC_*`, never in git.
 - Never settles after `expires_at`: it does not send within 90 s of it
@@ -1484,7 +1485,7 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   quote the listing fee → issuer pays it (the listing is approved) → issuer
   requests an issuance batch → (admin) approve batch →
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Base Sepolia / Robinhood / HyperEVM / Tempo.
-- Deploy on **Vercel**.
+- Deploy on **Vercel**. See "Production hosting" below.
 - **Niara-Register:** extend the indexer to capture `ListingApproved`
   (both listing paths, §4.1), `ListingFeePaid` (Solana), `Settled`,
   `DealExecuted` (Solana program and
@@ -1499,6 +1500,23 @@ Settlement worker: Node/TS service (Railway, same pattern as the Register indexe
   On EVM, `Settled` has no `cashback` field and the `CashbackDistributor` emits
   `CashbackCredited` in the same transaction (§4.2). Listing `doc_hash` can be
   signed and registered through Register's document signature feature.
+
+**Production hosting (decided 2026-11-24; still testnet only, every screen
+says so).**
+
+| Piece | Address | Host |
+|---|---|---|
+| Site (`niara-site`, the Exchange frontend) | `https://niaraglobal.com` | Vercel |
+| Order service and settlement worker (§5) | `https://api.niaraglobal.com` | Railway |
+| Niara-Register | `register.niaraglobal.com` | |
+| SME | `sme.niaraglobal.com` | planned, not built |
+
+The order service deploys from the **`production` branch** of
+`niara-exchange-engine`, and **migrations are applied first**: a deploy never
+applies one, and the service refuses to start until every migration it requires
+is in the database (§5, restart). So the order is: apply the migration, then
+update the `production` branch. The service's CORS allows the site's origins
+(`https://niaraglobal.com` and `https://www.niaraglobal.com`).
 
 Narrative: *the Exchange operates, the Register proves it.*
 

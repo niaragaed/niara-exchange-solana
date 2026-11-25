@@ -3,7 +3,8 @@
 Status: DRAFT for design freeze · Target: Solana Foundation interview (4–6 weeks)
 Chains in scope: Solana Devnet (priority), Base Sepolia, Robinhood Chain
 Testnet, HyperEVM Testnet, Tempo Testnet (target chains: §9.9)
-Deferred from v1: Ethereum Sepolia (contracts exceed its gas limits, §9.9)
+Out of scope: Ethereum L1, mainnet and Sepolia (decided 2026-11-24; Base covers
+the Ethereum ecosystem, §9.9)
 
 > Everything here runs on testnets with test tokens. No real assets, no real money,
 > no regulatory authorization. Every screen and doc must say so.
@@ -1109,7 +1110,7 @@ with `listing_fee_bps ≤ MAX_LISTING_FEE_BPS`, and the fee ledger's
 
 ---
 
-## 4. EVM — changes to `niara-contracts` (Sepolia, Base Sepolia, Robinhood, HyperEVM, Tempo)
+## 4. EVM — changes to `niara-contracts` (Base Sepolia, Robinhood, HyperEVM, Tempo)
 
 Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
 
@@ -1129,8 +1130,9 @@ Reuse `NiaraSettlement`, `CashbackDistributor`, `TimelockedAccessControl`. Add:
   guards so they accept exactly Ethereum Sepolia `11155111`, Base Sepolia
   `84532`, Robinhood Chain testnet `46630`, HyperEVM testnet `998` and Tempo
   testnet `42431`; any other chain, mainnets included, reverts
-  `UnsupportedChain`. Sepolia passes the guard but is not a v1 deployment
-  (§9.9). Keystore signers, and mock USDT / BRL test tokens as the
+  `UnsupportedChain`. Sepolia passes the guard but is out of scope for the
+  Exchange (§9.9): the guard is a leftover of that repository, and removing it
+  is its owner's call. Keystore signers, and mock USDT / BRL test tokens as the
   listed currencies, like `scripts/setup.ts` on Solana.
 - Same invariant fuzzing suite extended with the listing invariant.
 - **`P2PEscrow`** (EVM mirror of 3.5), **implemented**: `openDeal` (deposit),
@@ -1259,7 +1261,7 @@ deploy scripts accept exactly these five chain ids (§4). Testnets only.
 
 | Network | Chain ID | `--rpc-url` alias (`.env` variable) | RPC | Gas token | Explorer |
 |---|---|---|---|---|---|
-| Ethereum Sepolia (deferred from v1, §9.9) | 11155111 | `sepolia` (`SEPOLIA_RPC_URL`) | `https://ethereum-sepolia-rpc.publicnode.com` (public option; a provider URL in `.env` also works) | test ETH | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
+| Ethereum Sepolia (out of scope for the Exchange, §9.9; in the EVM repo only) | 11155111 | `sepolia` (`SEPOLIA_RPC_URL`) | `https://ethereum-sepolia-rpc.publicnode.com` (public option; a provider URL in `.env` also works) | test ETH | [sepolia.etherscan.io](https://sepolia.etherscan.io) |
 | Base Sepolia | 84532 | `base_sepolia` (`BASE_SEPOLIA_RPC_URL`) | `https://sepolia.base.org` (official public RPC) | test ETH | [sepolia.basescan.org](https://sepolia.basescan.org) |
 | Robinhood Chain testnet | 46630 | `robinhood_testnet` (`ROBINHOOD_TESTNET_RPC_URL`) | `https://rpc.testnet.chain.robinhood.com` | test ETH | [explorer.testnet.chain.robinhood.com](https://explorer.testnet.chain.robinhood.com) |
 | HyperEVM testnet | 998 | `hyperevm_testnet` (`HYPEREVM_TESTNET_RPC_URL`) | `https://rpc.hyperliquid-testnet.xyz/evm` | test HYPE | none working (Oct 2026)¹ |
@@ -1293,7 +1295,8 @@ README, "Network quirks"):
   native token; `eth_getBalance` returns a placeholder, not a balance.
 - **Robinhood.** The L1 data component follows the L1 price, which is why the
   multiplier is 200; only the gas used is charged.
-- Ethereum Sepolia is the case no multiplier fixes (§9.9).
+- Ethereum Sepolia is the case no multiplier fixes (§9.9); it is out of scope
+  for the Exchange.
 
 ---
 
@@ -1506,7 +1509,7 @@ Narrative: *the Exchange operates, the Register proves it.*
 | Week | Deliverable | Done when |
 |---|---|---|
 | 1 | Design freeze; Anchor workspace; `Config` + `Listing` + timelock + pause; EVM `ListingRegistry` + factory | unit tests green on both stacks |
-| 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Base Sepolia, then Robinhood, HyperEVM and Tempo (Sepolia deferred, §9.9) | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
+| 2 | Solana `settle` (delegate) + cashback + withdrawals; EVM settle gated by registry; deploy EVM to Base Sepolia, then Robinhood, HyperEVM and Tempo (Ethereum L1 is out of scope, §9.9) | invariants pass (proptest/LiteSVM + Foundry); EVM contracts verified on explorers |
 | 3 | Solana P2P escrow (`open/accept/cancel/expire_deal`); deploy program to Devnet; Supabase schema; matching engine; EVM settlement adapters | escrow invariants pass; end-to-end settle on Base Sepolia from the worker |
 | 4 | Solana settlement adapter; frontend real flow (EVM + Solana wallets) | end-to-end settle on Devnet from the UI |
 | 5 | Register indexer for five chains (Solana devnet, Base Sepolia, Robinhood, HyperEVM, Tempo); Vercel deploy; on-chain signed intents (if time) | Register shows real Exchange settlements |
@@ -1908,30 +1911,32 @@ Vision, not v1 scope.
 
 ### 9.9 Target chains
 
-Target chains: **Ethereum, Solana, Base, Hyperliquid (HyperEVM), Robinhood
-Chain and Tempo**. v1 runs on Solana Devnet, Base Sepolia, and three more
-EVM testnets: Robinhood Chain testnet (46630), HyperEVM testnet (998) and
-Tempo testnet (42431). **Ethereum Sepolia is deferred from v1** (below).
+Target chains: **Solana, Base, Hyperliquid (HyperEVM), Robinhood Chain and
+Tempo**. v1 runs on Solana Devnet, Base Sepolia, and three more EVM
+testnets: Robinhood Chain testnet (46630), HyperEVM testnet (998) and Tempo
+testnet (42431).
 
+- **Ethereum L1 is out of scope for the Exchange, mainnet and Sepolia**
+  (decision, 2026-11-24). **Base covers the Ethereum ecosystem**: it runs the
+  same EVM contracts under Ethereum's gas rules, so the Exchange does not
+  deploy to Ethereum itself. This replaces the earlier "deferred from v1" and
+  its pre-mainnet design item (splitting the contracts), which is dropped.
+  The measurements behind it stay as the record of why Sepolia was not
+  reachable:
+  - Sepolia caps a transaction at 16,777,216 gas (EIP-7825) and charges about
+    7x more for contract creation. On its prices `ListingRegistry` needed about
+    28.4M gas and `P2PEscrow` about 19.6M, so neither fit in one transaction
+    and no gas multiplier helped (`ListingRegistry` is 13.0 KB and also creates
+    the 4.8 KB `AssetTokenFactory`; `P2PEscrow` is 12.2 KB).
+  - Measurement, 2026-11-15: the same 10 KB contract creation costs
+    2,071,693 gas on Ethereum mainnet, Base and HyperEVM, but 15,634,968 gas
+    on Sepolia (about 7.5x). Mainnet is not repriced today.
+  - The `niara-contracts` deploy scripts' chain guard still accepts Sepolia
+    (§4); that is a leftover of the EVM repository, not a target.
 - Robinhood Chain, HyperEVM and Tempo reuse the EVM contracts (§4) as v1
   EVM targets, alongside Base Sepolia. Their chain ids are in the deploy
   scripts' chain guards (§4). Phase 1 dry runs and on-node gas measurements
   are done on all three; **finality has not been checked** on any of them.
-- **Ethereum Sepolia: deferred from v1 (pre-mainnet design item).** Sepolia
-  caps a transaction at 16,777,216 gas (EIP-7825) and charges about 7x more
-  for contract creation. On its prices `ListingRegistry` needs about 28.4M
-  gas and `P2PEscrow` about 19.6M, so neither fits in one transaction and no
-  gas multiplier helps. Deploying there requires splitting the contracts to
-  under about 10 KB of code each (`ListingRegistry` is 13.0 KB and also
-  creates the 4.8 KB `AssetTokenFactory`; `P2PEscrow` is 12.2 KB). That
-  split is a design decision not yet taken. The deploy scripts' chain guard
-  still accepts Sepolia (§4).
-  - Measurement, 2026-11-15: the same 10 KB contract creation costs
-    2,071,693 gas on Ethereum mainnet, Base and HyperEVM, but 15,634,968
-    gas on Sepolia (about 7.5x). Mainnet is not repriced today.
-  - Sepolia likely previews a future fork (an inference, not confirmed). If
-    that repricing reaches mainnet, splitting the contracts becomes
-    mandatory there, so it is a pre-mainnet item and not only a Sepolia one.
 - Each new chain extends the `SettlementAdapter` chain list (§2) and the
   Register indexer (§6).
 - No mainnet deployment on any chain before the gates of §9.6 (multisig,
@@ -1968,9 +1973,11 @@ Not in v1. Figures measured on the mainnets on 2026-11-15, at SOL $72.09,
 ETH $1,817 and HYPE $66.85. They move with prices; redo the measurement
 before any mainnet decision.
 
-**One-time deployment, all six chains: about $300.** About 95% of it is the
+**One-time deployment, measured for six chains (Ethereum L1 was one; five
+are in scope now): about $300.** About 95% of it is the
 Solana program's rent: 3.86 SOL (about $278), a deposit that is refundable
-if the program is closed. The EVM deployments are the small remainder.
+if the program is closed. The EVM deployments are the small remainder, so dropping Ethereum L1 does not
+change the order of magnitude.
 
 - **Upgrades need a temporary buffer.** Each Solana upgrade writes the new
   binary to a buffer account first, which needs about 3.9 SOL until the
@@ -1979,8 +1986,10 @@ if the program is closed. The EVM deployments are the small remainder.
 
 **Cost per `settle`.**
 
-- **Ethereum:** about 253k gas. That is about $0.07 at 0.154 gwei and about
-  $0.92 at 2 gwei (253,000 gas x gwei x ETH price).
+- **EVM:** about 253k gas, measured on Ethereum mainnet, whose gas rules Base
+  follows. The dollar figures are at Ethereum L1 prices (about $0.07 at 0.154
+  gwei and about $0.92 at 2 gwei: 253,000 gas x gwei x ETH price), a reference
+  and not a target chain; Base's fees were not measured here.
 - **Solana:** the fee is small, but each `["settled", match_id]` record
   (`SettlementRecord`, §3.2) keeps rent locked. Its size is 9 bytes: the
   8-byte Anchor discriminator plus the 1-byte `bump` (`8 +
@@ -2017,7 +2026,7 @@ if the program is closed. The EVM deployments are the small remainder.
    This also covers resting orders left below a minimum that was raised after
    they were admitted. The engine reports the cancellation with the reason `below_min_notional`
    (§5, cancellation audit trail).
-   Gas prices move the cost (Ethereum: $0.07 to $0.92 per settle between the
+   Gas prices move the cost (EVM, at Ethereum L1 prices: $0.07 to $0.92 per settle between the
    two gas prices above), so each minimum must be revisited as prices move.
 2. **Closing old `SettlementRecord`s to reclaim rent, without reopening
    replay.** Closing a record frees its `match_id`, so the same match could

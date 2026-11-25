@@ -137,7 +137,8 @@ price in USDT base units per lot).
 
 ```ts
 interface Match {
-  id: string;            // UUID v4: matches.id and the on-chain match_id (§3.4)
+  id: string;            // UUID v4: matches.id and the on-chain match_id (§3.4);
+                         //   EVM: its 16 bytes, `bytes16 matchId` (§4.2)
   sequence: number;      // position in the engine's output, from 1
   chain: ChainId;
   asset: string;         // mint / token address
@@ -157,6 +158,9 @@ interface Match {
   expiresAt: number;     // unix seconds: the earlier of the two orders' expiries
 }
 ```
+
+On EVM the same 16 bytes are `settle`'s `bytes16 matchId` (not `bytes32`) and
+the replay key of `settledMatches[bytes16]` (§4.2).
 
 `settle` takes `match_id = id`, `asset_amount = quantity` and
 `payment_amount = paymentAmount`. A match never settles after `expiresAt`.
@@ -1212,7 +1216,14 @@ Aligned on both chains:
   `settle(bytes16 matchId, ...)` sets `settledMatches[matchId]` before any transfer and
   reverts `MatchAlreadySettled` on a second attempt; `Settled` carries `matchId` first,
   like Solana's `match_id` (a storage slot instead of a `SettlementRecord` account, so
-  no rent).
+  no rent). `matchId` is **not indexed** in `Settled` (`assetToken`, `paymentToken`
+  and `buyer` are), so finding the transaction of a settled match means scanning
+  `Settled` logs by asset, payment token and buyer and comparing `matchId`. Indexing
+  it would turn that into one exact `eth_getLogs` query, but the EVM contracts are
+  not upgradeable, so the change waits for the next contract version
+  (**deferred**, founder, 2026-11-22; §9.13). It costs little today: the worker
+  records the settle transaction's hash, and the log scan only runs to recover a
+  transaction the database does not have (§2, `findSettlement`).
 
 What still differs, on purpose:
 

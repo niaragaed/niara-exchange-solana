@@ -391,6 +391,20 @@ Known limitations, handled explicitly:
   payment in USDT, `remaining / lot_size × limit_price` (in the USDT account).
   For a match the two needs are the match's `quantity` (seller) and
   `payment_amount` (buyer).
+- **IOC and market orders approve their cap.** An IOC buy is covered by
+  `quantity / lot_size × limit_price`, its signed limit, which for a market buy
+  is the price cap (§2, order types): it approves at most that and pays at most
+  that, each fill at its maker's price. The unused allowance is **not
+  reused**: each order approves exactly its own amount, and an approval
+  **replaces** the previous one (SPL `approve`, ERC-20 `approve`), so what an
+  IOC left unused (its unfilled part, and the gap between the cap and the
+  prices paid) is overwritten by the next order's approval instead of carried
+  over.
+- **EVM form.** The same check reads `allowance(wallet, NiaraSettlement)` and
+  `balanceOf(wallet)` on each leg's token: the asset for the seller, USDT for
+  the buyer. `NiaraSettlement` is the spender, there is no vault; the amounts
+  are the same needs as above, and an order is covered while both the
+  allowance and the balance are at least its need.
 - **When the service checks.** Before matching, it checks the new order
   (refused with `delegate_not_covered` if uncovered) and then the resting
   orders it would cross, best first, until their covered quantity is enough:

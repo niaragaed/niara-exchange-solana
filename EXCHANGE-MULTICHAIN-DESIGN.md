@@ -161,6 +161,23 @@ interface Match {
 `settle` takes `match_id = id`, `asset_amount = quantity` and
 `payment_amount = paymentAmount`. A match never settles after `expiresAt`.
 
+**Order types.** There are two times in force (§3.6): `GTC`, whose unmatched
+remainder rests in the book, and `IOC`, which matches at once against the book
+up to its signed limit price and cancels whatever is left (cancel reason
+`ioc_unfilled`, §5); an IOC never rests.
+
+A **market order** is not a third type: it is an IOC whose limit price is a
+**price cap**. The client sets the cap from the best opposite price (best ask
+for a buy, best bid for a sell) and a slippage tolerance, **1% by default and at
+most 5%**; the wallet signs the cap, so it is the most the wallet can pay (buy)
+or the least it can receive (sell), whatever the book does in between. The
+slippage limits are the client's: the engine enforces only the signed limit
+price and knows nothing of slippage. Each fill is at its maker's price (§2,
+`Match.makerOrderId`), so a market buy pays at most its cap and usually less.
+An IOC is never re-entered after a failed match (§5, failed matches). No
+program or contract change is needed: the signed intent already carries what
+the chain would check.
+
 **Who enforces that today.** Off-chain only, until `settle` checks the signed
 window on-chain (§3.6, §9.12 item 2). Two margins protect the deadline: the
 engine does not match an order with less than `SETTLEMENT_MARGIN_SECS`
@@ -1362,9 +1379,13 @@ counters and an audit trail (migration `20261120120000_match_reversals`).
     **at its original priority** (`seq`) through the normal matching loop, so
     the book never crosses (an order that arrived while it was out may now
     cross it). If it is no longer live it expires; if it was already
-    cancelled, expired or stale, the release is accounting only;
+    cancelled, expired or stale, the release is accounting only. An **IOC** is
+    the exception: it was immediate, so its released quantity does not wait for
+    a later match, and the order is cancelled (`ioc_unfilled`) instead of
+    re-entering;
   - **`expired`**: both are released. An order whose expiry is at or before
-    the match's `expires_at` expires; the other re-enters;
+    the match's `expires_at` expires; the other re-enters (an IOC is cancelled,
+    as above);
   - **`none`**: both are released but become `stale`, since re-entering they
     would match each other again and fail the same way in a loop.
 - **Restart.** The engine's rebuild also loads `filled` orders that still have

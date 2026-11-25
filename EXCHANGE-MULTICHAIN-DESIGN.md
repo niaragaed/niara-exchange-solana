@@ -555,7 +555,7 @@ Signed fields, in this order:
 
 | Field | Meaning |
 |---|---|
-| `version` | `1` |
+| `version` | `2` (current) or `1` (still accepted, see below) |
 | chain | the CAIP-2 id: `solana:<first 32 chars of the genesis hash>` (devnet: `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1`) or `eip155:<chainId>` (§4.3) |
 | `settlement` | Solana: the `niara_exchange` program id. EVM: the `NiaraSettlement` address |
 | `wallet` | the signer |
@@ -567,6 +567,12 @@ Signed fields, in this order:
 | `paymentAsset` | the chain's USDT (§3.4) |
 | `nonce` | 16 random bytes, non-zero, unique per (chain, wallet) |
 | `expiresAt` | unix seconds, **required** (§9.12 item 2) |
+| `timeInForce` | **v2 only.** `GTC` (good till cancelled: what is not matched at once rests in the book) or `IOC` (immediate or cancel: matched at once up to the limit price, the rest is cancelled and never rests; §5, order types) |
+
+**Versions.** Version 2 adds `timeInForce`. A v1 intent has no such field and
+means `GTC`, so v1 orders stay valid. A v1 and a v2 message never coincide: the
+version is in the Solana text's first line, and the EIP-712 type hash differs.
+The on-chain signed-intents milestone must rebuild **both** versions.
 
 Amounts must fit the on-chain width: `u64` on Solana (the notional
 `quantity / lotSize × limitPrice`, which becomes `payment_amount`, too),
@@ -574,10 +580,11 @@ Amounts must fit the on-chain width: `u64` on Solana (the notional
 
 - **Solana**: the wallet signs, with `signMessage` (ed25519), this UTF-8 text:
   lines joined by `\n`, no trailing newline, integers in plain decimal. The
-  testnet notice is part of what is signed. A typical message is 552 bytes.
+  testnet notice is part of what is signed. A typical v1 message is 552 bytes;
+  v2 adds the `Time in force` line (74 or 76 bytes), so 626 or 628.
 
   ```
-  Niara Exchange order intent v1
+  Niara Exchange order intent v2
   TESTNET ONLY: no real assets, no real money.
 
   Chain: solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1
@@ -588,24 +595,32 @@ Amounts must fit the on-chain width: `u64` on Solana (the notional
   Quantity: 5000000 (asset base units)
   Lot size: 1000000 (asset base units)
   Limit price: 25000000 (payment base units per lot)
+  Time in force: GTC (rests in the book until filled, cancelled or expired)
   Payment asset: <USDT mint>
   Nonce: <32 lowercase hex chars>
   Expires at: <unix seconds> (unix seconds)
   ```
 
-  The verifier rebuilds this text from the structured intent and never parses
-  signed text, so two different intents cannot share a message. Verification
+  The `Time in force` line reads `GTC (rests in the book until filled,
+  cancelled or expired)` or `IOC (fills now up to the limit price; the rest is
+  cancelled)`. A v1 text is the same without that line and with `v1` in the
+  first line. The verifier rebuilds this text from the structured intent and
+  never parses signed text, so two different intents cannot share a message. Verification
   is strict RFC 8032 (non-canonical `S` rejected), like the Ed25519 program's
   `verify_strict`.
 - **EVM**: EIP-712. Domain `{ name: "Niara Exchange", version: "1", chainId,
-  verifyingContract: NiaraSettlement }`. Type, with `side` 0 = buy, 1 = sell
+  verifyingContract: NiaraSettlement }` (unchanged between versions). Type,
+  with `side` 0 = buy, 1 = sell and, in v2, `timeInForce` 0 = GTC, 1 = IOC
   (the field order is part of the type hash):
 
   ```
   OrderIntent(address wallet,uint8 side,address asset,uint256 quantity,
               uint256 lotSize,uint256 limitPrice,address paymentAsset,
-              bytes16 nonce,uint64 expiresAt)
+              bytes16 nonce,uint64 expiresAt,uint8 timeInForce)
   ```
+
+  v1 is the same type without `timeInForce` (the same primary type name, a
+  different type hash).
 
   Verified with OpenZeppelin `ECDSA` (65-byte signatures, `v` 27 or 28, low
   `s`), not a bare `ecrecover`, which accepts a second, malleated encoding of
@@ -622,11 +637,16 @@ already cancelled.
 
 | Field | Meaning |
 |---|---|
-| `version` | `1` |
+| `version` | `1` (its own, see below) |
 | chain | CAIP-2 id, as in the order intent |
 | `settlement` | the same program / `NiaraSettlement` address as the order intent |
 | `wallet` | the order's wallet, and the signer |
 | `nonce` | the order intent's nonce |
+
+**Its own version.** The cancellation's version (1) is independent of the order
+intent's: it names the order by nonce, which is the same for a v1 and a v2
+order, so cancellation v1 cancels either and did not change when order intents
+gained `timeInForce`.
 
 - **Solana**: `signMessage` over this UTF-8 text (lines joined by `\n`, no
   trailing newline). The first line differs from the order intent's, so neither

@@ -1299,8 +1299,12 @@ Postgres 17, every table has `created_at` / `updated_at`):
   populated by the indexer; unique on (`chain_id`, `asset`).
 - `orders(id, seq, chain_id, asset, side, quantity, lot_size, limit_price,
   payment_asset, wallet, nonce, expires_at, intent_version, intent_signature,
-  filled_quantity, settled_quantity, released_quantity, voided_quantity,
-  status)`: one row per verified order intent (§3.6). `seq`
+  time_in_force, filled_quantity, settled_quantity, released_quantity,
+  voided_quantity, status, cancel_reason, cancel_signature)`: one row per
+  verified order intent (§3.6). `time_in_force` is `gtc` or `ioc` (default
+  `gtc`) and is signed with the intent (v2): immutable like the other signed
+  fields, `gtc` for every v1 intent (a check ties it to `intent_version`), and
+  an `ioc` never has a resting status (`open` or `partially_filled`; a check). `seq`
   is arrival order (time priority), assigned by the matching engine and stored
   as is, not by the database. Unique on (`chain_id`, `wallet`, `nonce`),
   so a signed intent enters the book once. The signed fields never change.
@@ -1397,14 +1401,25 @@ counters and an audit trail (migration `20261120120000_match_reversals`).
   it and places a new one), although the status enum would allow
   `stale → open`.
 
-**Cancellation audit trail (proposed, not yet in a migration).** Today
-`orders.status = 'cancelled'` does not say who cancelled or why; the engine
-knows the reason only as an event. A later migration adds
-`orders.cancel_reason` (`by_wallet`, `self_trade_prevention`,
-`below_min_notional`, the engine's three reasons) and `orders.cancel_signature`
-(the wallet's signed cancellation, §3.6, set only for `by_wallet`), so the
-audit trail shows who cancelled and why. Both are written once, with the
-cancelled status, and never change.
+**Cancellation audit trail.** `orders.cancel_reason` says why an order left
+the book and `orders.cancel_signature` holds the wallet's signed cancellation
+(§3.6) when the wallet cancelled it. Both are in migration
+`20261120130000_cancel_reasons`; `ioc_unfilled` and `time_in_force` came with
+`20261124120000_time_in_force`. The reason follows the status:
+
+| Status | `cancel_reason` |
+|---|---|
+| `cancelled` | `by_wallet` (the wallet signed a cancellation), `self_trade_prevention` (the newest order of a wallet that would have matched its own), `below_min_notional` (the remainder or the next match fell below the market minimum, §9.12 item 1) or `ioc_unfilled` (an IOC's unmatched remainder; IOC orders only) |
+| `expired` | `expired` |
+| `stale` | `stale` (the delegation no longer covers it, §3.5, or a failed match left it out of the book) |
+| `open`, `partially_filled`, `filled` | none |
+
+`cancel_signature` is exactly what the wallet sent (Solana: the base58 ed25519
+signature of the cancel text; EVM: the 0x-hex EIP-712 `CancelOrder`
+signature) and is present exactly when the reason is `by_wallet`. A written
+signature never changes, and a recorded reason is final except `stale`, which
+can become `by_wallet` because a stale order can still be cancelled by its
+wallet. Neither column is granted to the anonymous or authenticated roles.
 
 **Access (RLS on every table).** Anonymous users read only what the public
 order book needs: `chains`, approved `equity` and `currency` listings, and an

@@ -944,7 +944,7 @@ dependencies).
 - **Bitmap replay protection.** Each settlement creates a `SettlementRecord`
   that is never closed: ~0.00069596 SOL of rent per settlement (the
   rent-exempt minimum for 9 data bytes, §9.12) locked forever, growing linearly with volume.
-  Roadmap: replace the per-settlement records with bitmap pages (e.g. a
+  Roadmap (pre-mainnet, §9.13): replace the per-settlement records with bitmap pages (e.g. a
   `["settled_page", page_no]` account of N bits, with the match id mapped to a
   sequence number assigned by the matching engine), so one rent-exempt account
   covers thousands of settlements. Needs a sequence space the operator cannot
@@ -1485,6 +1485,10 @@ it runs inside the order service, hosting in §6).
   quote the listing fee → issuer pays it (the listing is approved) → issuer
   requests an issuance batch → (admin) approve batch →
   place order → match → settle → issuer withdraws cashback. Chain selector: Solana / Base Sepolia / Robinhood / HyperEVM / Tempo.
+- **Futures page: "planned, not available".** The site may show a futures page
+  only with that label, and no order, quote or price on it. Futures are a
+  **separate future product**, not part of the Exchange's spot order book and
+  not on this spec's roadmap (§9.13).
 - Deploy on **Vercel**. See "Production hosting" below.
 - **Niara-Register:** extend the indexer to capture `ListingApproved`
   (both listing paths, §4.1), `ListingFeePaid` (Solana), `Settled`,
@@ -1577,7 +1581,8 @@ settle, Solana P2P escrow, issuer cashback, honest labeling.
 Not in v1 unless marked done. §9.1 to §9.6 are ordered by what an incident
 would need first: contain it, recover from it, prove what happened. §9.7 to
 §9.11 are product vision, not v1 scope. §9.12 sizes what going to mainnet
-costs. They claim no regulatory status:
+costs. §9.13 fixes the roadmap order: what is decided for v1 and what moves to
+the pre-mainnet roadmap. They claim no regulatory status:
 Niara holds no authorization for any of these services (the testnet notice
 at the top applies), and none is offered before counsel has assessed its
 dependencies (§9.11).
@@ -2073,3 +2078,43 @@ change the order of magnitude.
 
    Until all of this exists, records stay never-closed (9 bytes, as §3.2), and
    the bitmap-page alternative (§3.10) is the other way to bound the rent.
+
+### 9.13 Roadmap order (decided 2026-11-24)
+
+What the Exchange builds next, and what waits. Nothing below changes the v1
+trust model or claims a regulatory status (§9.11).
+
+**Decided for v1.**
+
+1. **Market orders: done.** An IOC with a client-set price cap (§2, order
+   types; §3.5 for the approval).
+2. **Iceberg orders.** A large order shows only part of its quantity in the
+   book at a time. Design to be done: what is signed, and what the public
+   `order_book` view (§5) may show.
+3. **TWAP through a signed parent order.** The wallet signs one **parent order**
+   that authorizes the schedule, and the child orders follow from it, so the
+   wallet does not sign each slice. Design to be done: the parent's signed format, and how
+   each child is checked against it, which must be settled together with the
+   on-chain signed-intents milestone (§3.6).
+4. **Dividends (Merkle claim).** The issuer's distribution is fixed at a
+   snapshot of holders and published as a Merkle root, and each holder claims
+   its share with a proof (pull model, as for cashback). This is the
+   token-lifecycle work §3.10 lists for payouts (snapshot of holders +
+   on-chain distribution).
+5. **Voting (signed votes weighted by a snapshot).** Holders sign their votes
+   off-chain; each vote is weighted by the holder's balance at a snapshot, and
+   the **hash of the result** goes on-chain. The chain stores the result's
+   hash, not each vote.
+
+**Moved to the pre-mainnet roadmap** (they matter at volume and need the
+audit, not the testnet):
+
+- **Batching settlements.** Several matches in one transaction or call, to
+  lower the cost per settle (§9.12).
+- **The bitmap replay record** instead of one `SettlementRecord` per match
+  (§3.10).
+- **Contracts v2**, the next version of the EVM contracts (they are not
+  upgradeable): among other things, `Settled.matchId` indexed (§4.2).
+
+**Not on this roadmap.** Futures: a separate future product (§6). Ethereum L1
+(§9.9).
